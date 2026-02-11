@@ -10,15 +10,19 @@ const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
   `flags.${TOOLBELT_ID}.linked`
 ];
 const ASYNC_SCOPE_FALLBACK_TTL_MS = 12000;
+const TOOLBELT_LINKED_SUPPRESSION_TTL_MS = 30000;
+const TOOLBELT_LINKED_SUPPRESSION_USES = 3;
 
 let chatScrollElement = null;
 let chatAtBottom = false;
 let actorCreateEmbeddedDocumentsPatched = false;
 let macroExecuteScopeBridgePatched = false;
 let spellCastLinkedMacroBypassPatched = false;
+let toolbeltGetItemMacroSuppressionPatched = false;
 const macroExecutionScopeStack = [];
 let macroExecutionFallbackScope = null;
 let macroExecutionFallbackScopeUntil = 0;
+const toolbeltLinkedMacroSuppressions = new Map();
 
 const SAFE_SELF_EFFECT_UUID_PATTERNS = [
   /^Compendium\.pf2e\.equipment-effects\.Item\.[A-Za-z0-9]+$/i,
@@ -425,6 +429,81 @@ function setLinkedMacroFlagValue(spell, path, value) {
   }
 }
 
+function getSpellSuppressionKeys(spell) {
+  if (!spell) return [];
+  const keys = [];
+  const id = String(spell?.id ?? spell?._id ?? "").trim();
+  const uuid = String(spell?.uuid ?? "").trim();
+  const actorId = String(spell?.actor?.id ?? spell?.parent?.id ?? "").trim();
+  if (uuid) keys.push(`uuid:${uuid}`);
+  if (id) {
+    keys.push(`id:${id}`);
+    if (actorId) keys.push(`actor:${actorId}:id:${id}`);
+  }
+  return [...new Set(keys)];
+}
+
+function cleanupLinkedMacroSuppressions() {
+  const now = Date.now();
+  for (const [key, data] of toolbeltLinkedMacroSuppressions.entries()) {
+    if (!data || data.expiresAt <= now || data.uses <= 0) {
+      toolbeltLinkedMacroSuppressions.delete(key);
+    }
+  }
+}
+
+function registerLinkedMacroSuppressionForSpell(spell, uses = TOOLBELT_LINKED_SUPPRESSION_USES) {
+  if (!spell || uses <= 0) return;
+  cleanupLinkedMacroSuppressions();
+  const expiresAt = Date.now() + TOOLBELT_LINKED_SUPPRESSION_TTL_MS;
+  const keys = getSpellSuppressionKeys(spell);
+  for (const key of keys) {
+    const existing = toolbeltLinkedMacroSuppressions.get(key);
+    const mergedUses = Math.max(existing?.uses ?? 0, uses);
+    const mergedExpiry = Math.max(existing?.expiresAt ?? 0, expiresAt);
+    toolbeltLinkedMacroSuppressions.set(key, {
+      uses: mergedUses,
+      expiresAt: mergedExpiry
+    });
+  }
+}
+
+function consumeLinkedMacroSuppressionForSpell(spell) {
+  cleanupLinkedMacroSuppressions();
+  const keys = getSpellSuppressionKeys(spell);
+  for (const key of keys) {
+    const existing = toolbeltLinkedMacroSuppressions.get(key);
+    if (!existing) continue;
+    const remaining = existing.uses - 1;
+    if (remaining <= 0) {
+      toolbeltLinkedMacroSuppressions.delete(key);
+    } else {
+      toolbeltLinkedMacroSuppressions.set(key, {
+        uses: remaining,
+        expiresAt: existing.expiresAt
+      });
+    }
+    return true;
+  }
+  return false;
+}
+
+function installToolbeltActionableGetItemMacroSuppressionPatch() {
+  if (toolbeltGetItemMacroSuppressionPatched) return;
+  const actionableTool = game.modules.get(TOOLBELT_ID)?.dev?.tools?.actionable;
+  if (!actionableTool || typeof actionableTool.getItemMacro !== "function") return;
+
+  const originalGetItemMacro = actionableTool.getItemMacro.bind(actionableTool);
+  actionableTool.getItemMacro = async function getItemMacroSuppressed(action) {
+    if (shouldApplyToolbeltSpellCastLinkedBypass() && consumeLinkedMacroSuppressionForSpell(action)) {
+      return null;
+    }
+    return originalGetItemMacro(action);
+  };
+
+  toolbeltGetItemMacroSuppressionPatched = true;
+}
+
 function resolveSpellDocumentForCast(entry, spell) {
   if (!spell) return null;
   if (spell?.documentName === "Item" && spell?.type === "spell") {
@@ -493,6 +572,9 @@ function installMacroExecuteScopeBridge() {
     const trackedScope = hasScopeData(effectiveScope) ? effectiveScope : null;
     if (bridgeEnabled && trackedScope) {
       rememberMacroExecutionFallbackScope(trackedScope);
+      if (shouldApplyToolbeltSpellCastLinkedBypass()) {
+        registerLinkedMacroSuppressionForSpell(trackedScope.spell);
+      }
     }
 
     macroExecutionScopeStack.push(trackedScope);
@@ -798,7 +880,7 @@ Hooks.once("init", () => {
   });
   game.settings.register(MODULE_ID, "toolbeltSpellCastLinkedBypass", {
     name: "Toolbelt Spell Cast Linked-Macro Bypass",
-    hint: "Optional compatibility patch: when a linked spell macro internally casts, bypass one recursive linked-macro pass (same-scope or silent macro cast) to prevent duplicate dialogs.",
+    hint: "Optional compatibility patch: when a linked spell macro internally casts, bypass one recursive linked-macro pass and suppress one actionable linked lookup to prevent duplicate dialogs and preserve slot/charge consumption.",
     scope: "world",
     config: true,
     type: Boolean,
@@ -811,6 +893,7 @@ Hooks.once("ready", () => {
   refreshTargetHelperActionRowsFixStyle();
   installMacroExecuteScopeBridge();
   installToolbeltSpellCastLinkedBypass();
+  installToolbeltActionableGetItemMacroSuppressionPatch();
 
   Hooks.on("createItem", async (item, _options, userId) => {
     try {

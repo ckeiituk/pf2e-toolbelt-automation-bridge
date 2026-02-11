@@ -309,35 +309,6 @@ function shouldApplyToolbeltSpellCastLinkedBypass() {
 
 function getTargetHelperActionRowsFixCss() {
   return `
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied,
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied * {
-      writing-mode: horizontal-tb !important;
-      text-orientation: mixed !important;
-      white-space: nowrap;
-    }
-
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied button {
-      --button-size: auto;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: auto;
-      min-width: 7em;
-      height: auto;
-      min-height: 1.2em;
-      padding-inline: 0.35em;
-      white-space: nowrap;
-      writing-mode: horizontal-tb;
-      text-orientation: mixed;
-      line-height: 1.2;
-      filter: none;
-    }
-
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied button img,
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied button i {
-      display: none !important;
-    }
-
     .chat-message .message-content .effect-applied,
     .chat-message .message-content .effect-applied * {
       writing-mode: horizontal-tb !important;

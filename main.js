@@ -10,7 +10,7 @@ const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
   `flags.${TOOLBELT_ID}.linked`
 ];
 const ASYNC_SCOPE_FALLBACK_TTL_MS = 12000;
-const TOOLBELT_LINKED_SUPPRESSION_TTL_MS = 4000;
+const TOOLBELT_LINKED_SUPPRESSION_TTL_MS = 120000;
 const TOOLBELT_LINKED_SUPPRESSION_USES = 1;
 const TOOLBELT_ACTIONABLE_PATCH_RETRY_MS = 250;
 const TOOLBELT_ACTIONABLE_PATCH_MAX_RETRIES = 40;
@@ -388,6 +388,18 @@ function isToolbeltCastScope(scope) {
   return hasScopeData(scope) && typeof scope?.cast === "function" && !!scope?.spell;
 }
 
+function isSameSpellReference(left, right) {
+  if (!left || !right) return false;
+
+  const leftUuid = String(left?.uuid ?? "").trim();
+  const rightUuid = String(right?.uuid ?? "").trim();
+  if (leftUuid && rightUuid && leftUuid === rightUuid) return true;
+
+  const leftId = String(left?.id ?? left?._id ?? "").trim();
+  const rightId = String(right?.id ?? right?._id ?? "").trim();
+  return !!leftId && !!rightId && leftId === rightId;
+}
+
 function rememberMacroExecutionFallbackScope(scope) {
   if (!isToolbeltCastScope(scope)) return;
   macroExecutionFallbackScope = scope;
@@ -492,6 +504,23 @@ function consumeLinkedMacroSuppressionForSpell(spell) {
   return false;
 }
 
+function getToolbeltScopeForSuppression(spell) {
+  const activeScope = getLastScopeFromStack();
+  if (isToolbeltCastScope(activeScope) && isSameSpellReference(spell, activeScope.spell)) {
+    return activeScope;
+  }
+
+  if (
+    isToolbeltCastScope(macroExecutionFallbackScope) &&
+    Date.now() <= macroExecutionFallbackScopeUntil &&
+    isSameSpellReference(spell, macroExecutionFallbackScope.spell)
+  ) {
+    return macroExecutionFallbackScope;
+  }
+
+  return null;
+}
+
 function resolveToolbeltActionableTool() {
   const byModule = game.modules.get(TOOLBELT_ID)?.dev?.tools?.actionable;
   if (byModule && typeof byModule.getItemMacro === "function") return byModule;
@@ -523,7 +552,11 @@ function installToolbeltActionableGetItemMacroSuppressionPatch() {
   if (canPatchPrototype) {
     const originalGetItemMacro = actionableProto.getItemMacro;
     actionableProto.getItemMacro = async function getItemMacroSuppressed(action) {
-      if (shouldApplyToolbeltSpellCastLinkedBypass() && consumeLinkedMacroSuppressionForSpell(action)) {
+      if (
+        shouldApplyToolbeltSpellCastLinkedBypass() &&
+        getToolbeltScopeForSuppression(action) &&
+        consumeLinkedMacroSuppressionForSpell(action)
+      ) {
         return null;
       }
       return originalGetItemMacro.call(this, action);
@@ -535,7 +568,11 @@ function installToolbeltActionableGetItemMacroSuppressionPatch() {
 
   const originalGetItemMacro = actionableTool.getItemMacro.bind(actionableTool);
   actionableTool.getItemMacro = async function getItemMacroSuppressed(action) {
-    if (shouldApplyToolbeltSpellCastLinkedBypass() && consumeLinkedMacroSuppressionForSpell(action)) {
+    if (
+      shouldApplyToolbeltSpellCastLinkedBypass() &&
+      getToolbeltScopeForSuppression(action) &&
+      consumeLinkedMacroSuppressionForSpell(action)
+    ) {
       return null;
     }
     return originalGetItemMacro(action);

@@ -1,9 +1,21 @@
 {
   "id": "pf2e-toolbelt-automation-bridge",
   "title": "PF2e Toolbelt Automation Bridge",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "esmodules": [
     "main.js"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json"
+    },
+    {
+      "lang": "ru",
+      "name": "Русский",
+      "path": "lang/ru.json"
+    }
   ],
   "compatibility": {
     "minimum": "13",
@@ -23,5 +35,5 @@
   },
   "url": "https://github.com/ckeiituk/pf2e-toolbelt-automation-bridge",
   "manifest": "https://raw.githubusercontent.com/ckeiituk/pf2e-toolbelt-automation-bridge/main/module.json",
-  "download": "https://github.com/ckeiituk/pf2e-toolbelt-automation-bridge/releases/download/0.1.28/module.zip"
+  "download": "https://github.com/ckeiituk/pf2e-toolbelt-automation-bridge/releases/download/0.1.29/module.zip"
 }

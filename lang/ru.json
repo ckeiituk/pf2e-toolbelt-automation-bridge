@@ -1,0 +1,50 @@
+{
+  "pf2e-toolbelt-automation-bridge": {
+    "settings": {
+      "proxyToGM": {
+        "name": "Проксировать в активного ГМа",
+        "hint": "Если включено, клиенты без роли ГМа отправляют события бросков активному ГМу для автоматизаций."
+      },
+      "autoScrollTargets": {
+        "name": "Автопрокрутка Target Helper",
+        "hint": "Когда чат уже внизу, удерживать прокрутку внизу при расширении сообщения Target Helper."
+      },
+      "debugBridge": {
+        "name": "Отладочный лог bridge",
+        "hint": "Клиентский отладочный лог для патчей bridge (наследование scope, suppression и решения bypass linked-cast)."
+      },
+      "itemActivationsRuFix": {
+        "name": "PF2e Item Activations RU fix",
+        "hint": "Опциональный патч совместимости: исправляет тип действия и частоту для сгенерированных активаций на русском языке."
+      },
+      "itemActivationsAutoSelfEffect": {
+        "name": "PF2e Item Activations авто-link self effect",
+        "hint": "Опциональный патч совместимости: заполняет selfEffect из описания только если найден ровно один безопасный UUID эффекта."
+      },
+      "targetHelperActionRowsFix": {
+        "name": "Фикс верстки Applied",
+        "hint": "Опциональный патч совместимости: сохраняет читаемость меток Applied/effect-applied вместо вертикального текста."
+      },
+      "forceBarrageTargetDialogBridge": {
+        "name": "Улучшение диалога целей Force Barrage",
+        "hint": "Опциональный UI-патч: в диалоге распределения целей Force Barrage показывает портрет токена, нумерацию одинаковых имен, подсветку при наведении и фокус по клику."
+      },
+      "forceBarrageDialogMatchMode": {
+        "name": "Режим определения диалога Force Barrage",
+        "hint": "Safe использует строгие проверки меток целей; aggressive применяет улучшение к любому похожему диалогу числового распределения целей.",
+        "choices": {
+          "safe": "Safe (строгий)",
+          "aggressive": "Aggressive (шире)"
+        }
+      },
+      "toolbeltMacroScopeBridge": {
+        "name": "Toolbelt bridge для scope вложенных макросов",
+        "hint": "Опциональный патч совместимости: вложенные script-макросы наследуют scope заклинания Toolbelt (cast/options), включая асинхронные обертки compendium-link, чтобы linked-cast корректно тратил слоты/заряды."
+      },
+      "toolbeltSpellCastLinkedBypass": {
+        "name": "Toolbelt bypass linked-макроса при cast",
+        "hint": "Опциональный патч совместимости: когда linked-макрос заклинания кастует внутри себя, обходит один рекурсивный проход linked-макроса и подавляет один actionable linked lookup, чтобы убрать дубли диалогов и сохранить расход слотов/зарядов."
+      }
+    }
+  }
+}

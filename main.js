@@ -15,6 +15,7 @@ const TOOLBELT_LINKED_SUPPRESSION_TTL_MS = 86400000;
 const TOOLBELT_LINKED_SUPPRESSION_USES = 1;
 const TOOLBELT_ACTIONABLE_PATCH_RETRY_MS = 250;
 const TOOLBELT_ACTIONABLE_PATCH_MAX_RETRIES = 40;
+const TOOLBELT_ACTIONABLE_GET_ITEM_MACRO_PATH = "game.toolbelt.dev.tools.actionable.getItemMacro";
 
 let chatScrollElement = null;
 let chatAtBottom = false;
@@ -327,6 +328,23 @@ function shouldApplyToolbeltSpellCastLinkedBypass() {
   );
 }
 
+function isBridgeDebugEnabled() {
+  try {
+    return !!game.settings.get(MODULE_ID, "debugBridge");
+  } catch (_error) {
+    return false;
+  }
+}
+
+function bridgeDebug(message, payload) {
+  if (!isBridgeDebugEnabled()) return;
+  if (payload === undefined) {
+    console.debug(`[${MODULE_ID}] ${message}`);
+    return;
+  }
+  console.debug(`[${MODULE_ID}] ${message}`, payload);
+}
+
 function getTargetHelperActionRowsFixCss() {
   return `
     .chat-message .message-content .effect-applied,
@@ -458,14 +476,35 @@ function formatTokenGridPositionLabel(token) {
   return `x${gridX}, y${gridY}`;
 }
 
-function isLikelyForceBarrageTargetDialog(app, root) {
+function isLikelyForceBarrageTargetDialog(root, userTargets) {
   if (!(root instanceof HTMLElement)) return false;
-  const title = String(app?.title ?? "");
-  if (!/barrage|magic missile|шквал силы|снаряд/i.test(title)) return false;
 
-  const hasDistributionInputs = !!root.querySelector("input[type='number'][id$='qd']");
-  if (!hasDistributionInputs) return false;
-  return !!root.querySelector("table");
+  const distributionInputs = Array.from(root.querySelectorAll("input[id$='qd']"));
+  if (distributionInputs.length === 0) return false;
+  if (!root.querySelector("table")) return false;
+  if (root.querySelector("select[id$='qd']")) return false;
+  if (root.querySelector("input[type='checkbox'][id$='qd']")) return false;
+  if (distributionInputs.some((input) => input.type !== "number")) return false;
+  if (distributionInputs.length !== userTargets.length) return false;
+
+  const targetNameSet = new Set(
+    userTargets
+      .map((target) => String(target?.name ?? target?.document?.name ?? "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const labels = Array.from(root.querySelectorAll("table tr th label"));
+  const hasTargetFigcaption = labels.some((label) => /target\s*#\d+/i.test(label.textContent ?? ""));
+  const hasTargetNameMatch = labels.some((label) => {
+    const text = String(label.textContent ?? "").trim().toLowerCase();
+    if (!text) return false;
+    for (const targetName of targetNameSet) {
+      if (targetName && text.includes(targetName)) return true;
+    }
+    return false;
+  });
+
+  return hasTargetFigcaption || hasTargetNameMatch;
 }
 
 function enhanceForceBarrageTargetDialog(app, html) {
@@ -474,10 +513,10 @@ function enhanceForceBarrageTargetDialog(app, html) {
   const root = getHTMLElement(html);
   if (!root) return;
   if (root.dataset.bridgeForceBarrageDialogPatched === "true") return;
-  if (!isLikelyForceBarrageTargetDialog(app, root)) return;
 
   const userTargets = Array.from(game.user?.targets ?? []);
   if (userTargets.length === 0) return;
+  if (!isLikelyForceBarrageTargetDialog(root, userTargets)) return;
 
   const targetRows = Array.from(root.querySelectorAll("table tr")).filter((row) =>
     row.querySelector("input[type='number'][id$='qd']")
@@ -665,6 +704,12 @@ function registerLinkedMacroSuppressionForSpell(spell, uses = TOOLBELT_LINKED_SU
   cleanupLinkedMacroSuppressions();
   const expiresAt = Date.now() + TOOLBELT_LINKED_SUPPRESSION_TTL_MS;
   const keys = getSpellSuppressionKeys(spell);
+  bridgeDebug("register suppression", {
+    spell: String(spell?.name ?? spell?.id ?? ""),
+    keys,
+    uses,
+    scopeBound: !!scopeRef
+  });
   for (const key of keys) {
     const existing = toolbeltLinkedMacroSuppressions.get(key);
     const mergedUses = Math.max(existing?.uses ?? 0, uses);
@@ -696,8 +741,19 @@ function consumeLinkedMacroSuppressionForSpell(spell, scopeRef = null) {
         scopeRef: existing.scopeRef ?? null
       });
     }
+    bridgeDebug("consume suppression", {
+      spell: String(spell?.name ?? spell?.id ?? ""),
+      key,
+      remaining,
+      scopeBound: !!existing.scopeRef
+    });
     return true;
   }
+  bridgeDebug("consume suppression miss", {
+    spell: String(spell?.name ?? spell?.id ?? ""),
+    keys,
+    scopeBound: !!scopeRef
+  });
   return false;
 }
 
@@ -718,65 +774,34 @@ function getToolbeltScopeForSuppression(spell) {
   return null;
 }
 
-function resolveToolbeltActionableTool() {
-  const byModule = game.modules.get(TOOLBELT_ID)?.dev?.tools?.actionable;
-  if (byModule && typeof byModule.getItemMacro === "function") return byModule;
-
-  const byGameContext = game.toolbelt?.dev?.tools?.actionable;
-  if (byGameContext && typeof byGameContext.getItemMacro === "function") return byGameContext;
-
-  return null;
-}
-
 function installToolbeltActionableGetItemMacroSuppressionPatch() {
   if (toolbeltGetItemMacroSuppressionPatched) return true;
 
-  const actionableTool = resolveToolbeltActionableTool();
-  if (!actionableTool) return false;
+  const actionableGetItemMacro = game?.toolbelt?.dev?.tools?.actionable?.getItemMacro;
+  if (typeof actionableGetItemMacro !== "function") return false;
 
-  const actionableProto = Object.getPrototypeOf(actionableTool);
-  const canPatchPrototype = actionableProto && typeof actionableProto.getItemMacro === "function";
-
-  if (canPatchPrototype && actionableProto.__bridgeToolbeltGetItemMacroPatched) {
-    toolbeltGetItemMacroSuppressionPatched = true;
-    return true;
-  }
-  if (!canPatchPrototype && actionableTool.__bridgeToolbeltGetItemMacroPatched) {
-    toolbeltGetItemMacroSuppressionPatched = true;
-    return true;
-  }
-
-  if (canPatchPrototype) {
-    const originalGetItemMacro = actionableProto.getItemMacro;
-    actionableProto.getItemMacro = async function getItemMacroSuppressed(action) {
+  const libWrapperRegistered = registerBridgeLibWrapper(
+    TOOLBELT_ACTIONABLE_GET_ITEM_MACRO_PATH,
+    async function toolbeltGetItemMacroSuppressed(wrapped, action) {
       const suppressionScope = getToolbeltScopeForSuppression(action);
       if (
         shouldApplyToolbeltSpellCastLinkedBypass() &&
         suppressionScope &&
         consumeLinkedMacroSuppressionForSpell(action, suppressionScope)
       ) {
+        bridgeDebug("suppress actionable linked macro lookup", {
+          spell: String(action?.name ?? action?.id ?? ""),
+          scopeSpell: String(suppressionScope?.spell?.name ?? suppressionScope?.spell?.id ?? "")
+        });
         return null;
       }
-      return originalGetItemMacro.call(this, action);
-    };
-    actionableProto.__bridgeToolbeltGetItemMacroPatched = true;
-    toolbeltGetItemMacroSuppressionPatched = true;
-    return true;
-  }
+      return await wrapped(action);
+    },
+    "MIXED"
+  );
 
-  const originalGetItemMacro = actionableTool.getItemMacro.bind(actionableTool);
-  actionableTool.getItemMacro = async function getItemMacroSuppressed(action) {
-    const suppressionScope = getToolbeltScopeForSuppression(action);
-    if (
-      shouldApplyToolbeltSpellCastLinkedBypass() &&
-      suppressionScope &&
-      consumeLinkedMacroSuppressionForSpell(action, suppressionScope)
-    ) {
-      return null;
-    }
-    return originalGetItemMacro(action);
-  };
-  actionableTool.__bridgeToolbeltGetItemMacroPatched = true;
+  if (!libWrapperRegistered) return false;
+  bridgeDebug("installed getItemMacro suppression wrapper", { target: TOOLBELT_ACTIONABLE_GET_ITEM_MACRO_PATH });
   toolbeltGetItemMacroSuppressionPatched = true;
   return true;
 }
@@ -887,6 +912,15 @@ async function runMacroExecuteScopeBridge(macroDoc, wrapped, args) {
   }
 
   const trackedScope = isToolbeltCastScope(effectiveScope) ? effectiveScope : null;
+  bridgeDebug("macro scope bridge", {
+    macro: String(macroDoc?.name ?? ""),
+    hasIncomingScopeArg,
+    incomingScopeIsToolbelt,
+    inheritedFromStack: !!inheritedScopeFromStack,
+    inheritedFromFallback: !!inheritedScopeFromFallback,
+    trackedScope: !!trackedScope
+  });
+
   if (bridgeEnabled && trackedScope) {
     rememberMacroExecutionFallbackScope(trackedScope);
     if (shouldApplyToolbeltSpellCastLinkedBypass()) {
@@ -926,6 +960,10 @@ async function runSpellCastLinkedBypass(entry, wrapped, spell, options = {}) {
     getLinkedMacroFlagData(spellDoc) ??
     getLinkedMacroFlagData(activeScope?.spell);
   if (!linkedFlagData) {
+    bridgeDebug("cast bypass skipped: no linked flag", {
+      spell: String(castSpell?.name ?? castSpell?.id ?? ""),
+      scopeSpell: String(activeScope?.spell?.name ?? activeScope?.spell?.id ?? "")
+    });
     return await wrapped(castSpell, options);
   }
 
@@ -936,9 +974,20 @@ async function runSpellCastLinkedBypass(entry, wrapped, spell, options = {}) {
   const isSilentCast = options?.message === false;
   const silentMacroCast = isSilentCast && (isInsideScriptMacroExecution() || isToolbeltCastScope(activeScope));
   if (!sameSpellScopeCast && !silentMacroCast) {
+    bridgeDebug("cast bypass skipped: scope mismatch", {
+      spell: String(castSpell?.name ?? castSpell?.id ?? ""),
+      sameSpellScopeCast,
+      silentMacroCast
+    });
     return await wrapped(castSpell, options);
   }
 
+  bridgeDebug("cast bypass active", {
+    spell: String(castSpell?.name ?? castSpell?.id ?? ""),
+    linkedPath: linkedFlagData.path,
+    sameSpellScopeCast,
+    silentMacroCast
+  });
   const targetsToPatch = new Set([spell, spellDoc, activeScope?.spell].filter(Boolean));
   const previousValues = [];
   for (const target of targetsToPatch) {
@@ -973,10 +1022,13 @@ function installMacroExecuteScopeBridge() {
   );
 
   if (!libWrapperRegistered) {
+    bridgeDebug("macro scope bridge using fallback patch");
     const originalExecute = macroProto.execute;
     macroProto.execute = async function macroExecuteScopeBridgeFallback(...args) {
       return runMacroExecuteScopeBridge(this, (...wrappedArgs) => originalExecute.apply(this, wrappedArgs), args);
     };
+  } else {
+    bridgeDebug("macro scope bridge using libWrapper");
   }
 
   macroExecuteScopeBridgePatched = true;
@@ -997,10 +1049,13 @@ function installToolbeltSpellCastLinkedBypass() {
   );
 
   if (!libWrapperRegistered) {
+    bridgeDebug("spell cast bypass using fallback patch");
     const originalCast = spellcastingProto.cast;
     spellcastingProto.cast = async function spellCastLinkedBypassFallback(spell, options = {}) {
       return runSpellCastLinkedBypass(this, (wrappedSpell, wrappedOptions) => originalCast.call(this, wrappedSpell, wrappedOptions), spell, options);
     };
+  } else {
+    bridgeDebug("spell cast bypass using libWrapper");
   }
 
   spellCastLinkedMacroBypassPatched = true;
@@ -1198,6 +1253,14 @@ Hooks.once("init", () => {
     config: true,
     type: Boolean,
     default: true
+  });
+  game.settings.register(MODULE_ID, "debugBridge", {
+    name: "Bridge Debug Logging",
+    hint: "Client-side debug logging for bridge patches (scope inheritance, suppression, and linked-cast bypass decisions).",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: false
   });
   game.settings.register(MODULE_ID, "itemActivationsRuFix", {
     name: "PF2e Item Activations RU Fix",

@@ -5,6 +5,10 @@ const ITEM_ACTIVATIONS_ID = "pf2e-item-activations";
 const SOCKET = `module.${MODULE_ID}`;
 const CHAT_BOTTOM_EPSILON = 8;
 const TOOLBELT_ACTION_ROWS_FIX_STYLE_ID = `${MODULE_ID}-toolbelt-action-rows-fix`;
+const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
+  "flags.actionable.linked",
+  `flags.${TOOLBELT_ID}.linked`
+];
 
 let chatScrollElement = null;
 let chatAtBottom = false;
@@ -369,6 +373,25 @@ function isInsideScriptMacroExecution() {
   return macroExecutionScopeStack.length > 0;
 }
 
+function getLinkedMacroFlagData(spell) {
+  if (!spell) return null;
+  for (const path of TOOLBELT_LINKED_MACRO_FLAG_PATHS) {
+    const value = foundry.utils.getProperty(spell, path);
+    if (value) {
+      return { path, value };
+    }
+  }
+  return null;
+}
+
+function setLinkedMacroFlagValue(spell, path, value) {
+  if (!spell || !path) return;
+  foundry.utils.setProperty(spell, path, value);
+  if (spell?._source && typeof spell._source === "object") {
+    foundry.utils.setProperty(spell._source, path, value);
+  }
+}
+
 function installMacroExecuteScopeBridge() {
   if (macroExecuteScopeBridgePatched) return;
 
@@ -424,9 +447,8 @@ function installToolbeltSpellCastLinkedBypass() {
       return originalCast.call(this, spell, options);
     }
 
-    const linkedFlagPath = `flags.${TOOLBELT_ID}.linked`;
-    const linkedMacroUuid = spell ? foundry.utils.getProperty(spell, linkedFlagPath) : null;
-    if (!linkedMacroUuid) {
+    const linkedFlagData = getLinkedMacroFlagData(spell);
+    if (!linkedFlagData) {
       return originalCast.call(this, spell, options);
     }
 
@@ -441,11 +463,11 @@ function installToolbeltSpellCastLinkedBypass() {
       return originalCast.call(this, spell, options);
     }
 
-    foundry.utils.setProperty(spell, linkedFlagPath, null);
+    setLinkedMacroFlagValue(spell, linkedFlagData.path, null);
     try {
       return await originalCast.call(this, spell, options);
     } finally {
-      foundry.utils.setProperty(spell, linkedFlagPath, linkedMacroUuid);
+      setLinkedMacroFlagValue(spell, linkedFlagData.path, linkedFlagData.value);
     }
   };
 

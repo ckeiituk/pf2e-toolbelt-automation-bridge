@@ -567,7 +567,7 @@ function hasScopeData(value) {
 function getLastScopeFromStack() {
   for (let index = macroExecutionScopeStack.length - 1; index >= 0; index -= 1) {
     const scope = macroExecutionScopeStack[index];
-    if (hasScopeData(scope)) return scope;
+    if (isToolbeltCastScope(scope)) return scope;
   }
   return null;
 }
@@ -837,64 +837,147 @@ function resolveSpellDocumentForCast(entry, spell) {
   return null;
 }
 
+function canUseLibWrapper() {
+  return typeof globalThis?.libWrapper?.register === "function";
+}
+
+function registerBridgeLibWrapper(target, wrapper, type = "MIXED") {
+  if (!canUseLibWrapper()) return false;
+  try {
+    globalThis.libWrapper.register(MODULE_ID, target, wrapper, type);
+    return true;
+  } catch (error) {
+    console.warn(`[${MODULE_ID}] Failed to register libWrapper for ${target}`, error);
+    return false;
+  }
+}
+
+async function runMacroExecuteScopeBridge(macroDoc, wrapped, args) {
+  if (macroDoc?.type !== "script") {
+    return await wrapped(...args);
+  }
+
+  const bridgeEnabled = shouldApplyToolbeltMacroScopeBridge();
+  const hasIncomingScopeArg = args.length > 0;
+  const incomingScope = hasIncomingScopeArg ? args[0] : undefined;
+  const incomingScopeIsPlainObject = isPlainObjectScope(incomingScope);
+  const incomingScopeHasData = hasScopeData(incomingScope);
+  const incomingScopeIsToolbelt = isToolbeltCastScope(incomingScope);
+  const canBridgeFirstArg = !hasIncomingScopeArg || incomingScopeIsPlainObject;
+
+  const inheritedScopeFromStack = bridgeEnabled && canBridgeFirstArg ? getLastScopeFromStack() : null;
+  const inheritedScopeFromFallback =
+    bridgeEnabled &&
+    canBridgeFirstArg &&
+    !inheritedScopeFromStack &&
+    !incomingScopeIsToolbelt &&
+    !incomingScopeHasData &&
+    isLikelyAsyncLinkedWrapperMacro(macroDoc)
+      ? takeMacroExecutionFallbackScope()
+      : null;
+  const inheritedScope = inheritedScopeFromStack ?? inheritedScopeFromFallback;
+
+  let effectiveScope = incomingScopeIsToolbelt ? incomingScope : null;
+  if (!effectiveScope && bridgeEnabled && canBridgeFirstArg) {
+    effectiveScope = inheritedScope;
+  }
+
+  if (bridgeEnabled && incomingScopeIsToolbelt) {
+    rememberMacroExecutionFallbackScope(incomingScope);
+  }
+
+  const trackedScope = isToolbeltCastScope(effectiveScope) ? effectiveScope : null;
+  if (bridgeEnabled && trackedScope) {
+    rememberMacroExecutionFallbackScope(trackedScope);
+    if (shouldApplyToolbeltSpellCastLinkedBypass()) {
+      registerLinkedMacroSuppressionForSpell(trackedScope.spell, TOOLBELT_LINKED_SUPPRESSION_USES, trackedScope);
+    }
+  }
+
+  macroExecutionScopeStack.push(trackedScope);
+  try {
+    if (!canBridgeFirstArg) {
+      return await wrapped(...args);
+    }
+
+    if (hasIncomingScopeArg) {
+      if (!trackedScope) return await wrapped(...args);
+      return await wrapped(trackedScope, ...args.slice(1));
+    }
+
+    if (!trackedScope) return await wrapped(...args);
+    return await wrapped(trackedScope);
+  } finally {
+    macroExecutionScopeStack.pop();
+  }
+}
+
+async function runSpellCastLinkedBypass(entry, wrapped, spell, options = {}) {
+  const spellDoc = resolveSpellDocumentForCast(entry, spell);
+  const castSpell = spellDoc ?? spell;
+
+  if (!shouldApplyToolbeltSpellCastLinkedBypass()) {
+    return await wrapped(castSpell, options);
+  }
+
+  const activeScope = getLastScopeFromStack();
+  const linkedFlagData =
+    getLinkedMacroFlagData(spell) ??
+    getLinkedMacroFlagData(spellDoc) ??
+    getLinkedMacroFlagData(activeScope?.spell);
+  if (!linkedFlagData) {
+    return await wrapped(castSpell, options);
+  }
+
+  const activeScopeSpellUuid = String(activeScope?.spell?.uuid ?? "");
+  const currentSpellUuid = String(spellDoc?.uuid ?? spell?.uuid ?? "");
+  const sameSpellScopeCast = !!activeScopeSpellUuid && activeScopeSpellUuid === currentSpellUuid;
+
+  const isSilentCast = options?.message === false;
+  const silentMacroCast = isSilentCast && (isInsideScriptMacroExecution() || isToolbeltCastScope(activeScope));
+  if (!sameSpellScopeCast && !silentMacroCast) {
+    return await wrapped(castSpell, options);
+  }
+
+  const targetsToPatch = new Set([spell, spellDoc, activeScope?.spell].filter(Boolean));
+  const previousValues = [];
+  for (const target of targetsToPatch) {
+    const previousValue = foundry.utils.getProperty(target, linkedFlagData.path);
+    if (previousValue !== undefined && previousValue !== null) {
+      previousValues.push({ target, previousValue });
+      setLinkedMacroFlagValue(target, linkedFlagData.path, null);
+    }
+  }
+
+  try {
+    return await wrapped(castSpell, options);
+  } finally {
+    for (const { target, previousValue } of previousValues) {
+      setLinkedMacroFlagValue(target, linkedFlagData.path, previousValue);
+    }
+  }
+}
+
 function installMacroExecuteScopeBridge() {
   if (macroExecuteScopeBridgePatched) return;
 
   const macroProto = CONFIG?.Macro?.documentClass?.prototype ?? Macro?.prototype;
   if (!macroProto || typeof macroProto.execute !== "function") return;
 
-  const originalExecute = macroProto.execute;
-  macroProto.execute = async function macroExecuteScopeBridge(...args) {
-    if (this?.type !== "script") {
-      return await originalExecute.apply(this, args);
-    }
+  const libWrapperRegistered = registerBridgeLibWrapper(
+    "Macro.prototype.execute",
+    async function macroExecuteScopeBridgeWrapped(wrapped, ...args) {
+      return runMacroExecuteScopeBridge(this, (...wrappedArgs) => wrapped(...wrappedArgs), args);
+    },
+    "MIXED"
+  );
 
-    const bridgeEnabled = shouldApplyToolbeltMacroScopeBridge();
-    const hasIncomingScopeArg = args.length > 0;
-    const incomingScope = hasIncomingScopeArg ? args[0] : undefined;
-    const incomingScopeHasData = hasScopeData(incomingScope);
-    const inheritedScopeFromStack = bridgeEnabled ? getLastScopeFromStack() : null;
-    const inheritedScopeFromFallback =
-      bridgeEnabled &&
-      !inheritedScopeFromStack &&
-      !incomingScopeHasData &&
-      isLikelyAsyncLinkedWrapperMacro(this)
-        ? takeMacroExecutionFallbackScope()
-        : null;
-    const inheritedScope = inheritedScopeFromStack ?? inheritedScopeFromFallback;
-
-    let effectiveScope = incomingScope;
-    if (bridgeEnabled && !incomingScopeHasData && inheritedScope) {
-      effectiveScope = inheritedScope;
-    }
-
-    if (bridgeEnabled && incomingScopeHasData) {
-      rememberMacroExecutionFallbackScope(incomingScope);
-    }
-
-    const trackedScope = hasScopeData(effectiveScope) ? effectiveScope : null;
-    if (bridgeEnabled && trackedScope) {
-      rememberMacroExecutionFallbackScope(trackedScope);
-      if (shouldApplyToolbeltSpellCastLinkedBypass()) {
-        registerLinkedMacroSuppressionForSpell(trackedScope.spell, TOOLBELT_LINKED_SUPPRESSION_USES, trackedScope);
-      }
-    }
-
-    macroExecutionScopeStack.push(trackedScope);
-    try {
-      if (!hasIncomingScopeArg && !hasScopeData(effectiveScope)) {
-        return await originalExecute.apply(this, args);
-      }
-
-      const forwardedArgs = hasIncomingScopeArg
-        ? [effectiveScope, ...args.slice(1)]
-        : [effectiveScope];
-
-      return await originalExecute.apply(this, forwardedArgs);
-    } finally {
-      macroExecutionScopeStack.pop();
-    }
-  };
+  if (!libWrapperRegistered) {
+    const originalExecute = macroProto.execute;
+    macroProto.execute = async function macroExecuteScopeBridgeFallback(...args) {
+      return runMacroExecuteScopeBridge(this, (...wrappedArgs) => originalExecute.apply(this, wrappedArgs), args);
+    };
+  }
 
   macroExecuteScopeBridgePatched = true;
 }
@@ -905,52 +988,20 @@ function installToolbeltSpellCastLinkedBypass() {
   const spellcastingProto = CONFIG?.PF2E?.Item?.documentClasses?.spellcastingEntry?.prototype;
   if (!spellcastingProto || typeof spellcastingProto.cast !== "function") return;
 
-  const originalCast = spellcastingProto.cast;
-  spellcastingProto.cast = async function spellCastLinkedBypass(spell, options = {}) {
-    const spellDoc = resolveSpellDocumentForCast(this, spell);
-    const castSpell = spellDoc ?? spell;
+  const libWrapperRegistered = registerBridgeLibWrapper(
+    "CONFIG.PF2E.Item.documentClasses.spellcastingEntry.prototype.cast",
+    async function spellCastLinkedBypassWrapped(wrapped, spell, options = {}) {
+      return runSpellCastLinkedBypass(this, (wrappedSpell, wrappedOptions) => wrapped(wrappedSpell, wrappedOptions), spell, options);
+    },
+    "MIXED"
+  );
 
-    if (!shouldApplyToolbeltSpellCastLinkedBypass()) {
-      return originalCast.call(this, castSpell, options);
-    }
-
-    const activeScope = getLastScopeFromStack();
-    const linkedFlagData =
-      getLinkedMacroFlagData(spell) ??
-      getLinkedMacroFlagData(spellDoc) ??
-      getLinkedMacroFlagData(activeScope?.spell);
-    if (!linkedFlagData) {
-      return originalCast.call(this, castSpell, options);
-    }
-
-    const activeScopeSpellUuid = String(activeScope?.spell?.uuid ?? "");
-    const currentSpellUuid = String(spellDoc?.uuid ?? spell?.uuid ?? "");
-    const sameSpellScopeCast = !!activeScopeSpellUuid && activeScopeSpellUuid === currentSpellUuid;
-
-    const isSilentCast = options?.message === false;
-    const silentMacroCast = isSilentCast && (isInsideScriptMacroExecution() || isToolbeltCastScope(activeScope));
-    if (!sameSpellScopeCast && !silentMacroCast) {
-      return originalCast.call(this, castSpell, options);
-    }
-
-    const targetsToPatch = new Set([spell, spellDoc, activeScope?.spell].filter(Boolean));
-    const previousValues = [];
-    for (const target of targetsToPatch) {
-      const previousValue = foundry.utils.getProperty(target, linkedFlagData.path);
-      if (previousValue !== undefined && previousValue !== null) {
-        previousValues.push({ target, previousValue });
-        setLinkedMacroFlagValue(target, linkedFlagData.path, null);
-      }
-    }
-
-    try {
-      return await originalCast.call(this, castSpell, options);
-    } finally {
-      for (const { target, previousValue } of previousValues) {
-        setLinkedMacroFlagValue(target, linkedFlagData.path, previousValue);
-      }
-    }
-  };
+  if (!libWrapperRegistered) {
+    const originalCast = spellcastingProto.cast;
+    spellcastingProto.cast = async function spellCastLinkedBypassFallback(spell, options = {}) {
+      return runSpellCastLinkedBypass(this, (wrappedSpell, wrappedOptions) => originalCast.call(this, wrappedSpell, wrappedOptions), spell, options);
+    };
+  }
 
   spellCastLinkedMacroBypassPatched = true;
 }

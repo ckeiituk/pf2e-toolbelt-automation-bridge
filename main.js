@@ -7,6 +7,7 @@ const CHAT_BOTTOM_EPSILON = 8;
 
 let chatScrollElement = null;
 let chatAtBottom = false;
+let actorCreateEmbeddedDocumentsPatched = false;
 
 const RUSSIAN_NUMBER_MAP = {
   "один": 1,
@@ -193,6 +194,56 @@ function parseFrequencyFromDescription(description) {
   };
 }
 
+function getValidActionTraits() {
+  return new Set(Object.keys(CONFIG?.PF2E?.actionTraits ?? {}));
+}
+
+function normalizeTraitKey(raw) {
+  const source = String(raw ?? "").trim();
+  if (!source) return null;
+  const fromLink = source.match(/@Trait\[([^\]|]+)(?:\|[^\]]+)?\]/i);
+  const keyRaw = fromLink ? fromLink[1] : source;
+  const key = keyRaw
+    .toLowerCase()
+    .replace(/[`"'{}()[\]]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return key || null;
+}
+
+function extractTraitsFromDescription(description, validTraits) {
+  const traits = [];
+  const value = String(description ?? "");
+  const regex = /@Trait\[([^\]|]+)(?:\|[^\]]+)?\]/gi;
+  let match = regex.exec(value);
+  while (match) {
+    const key = normalizeTraitKey(match[1]);
+    if (key && validTraits.has(key)) traits.push(key);
+    match = regex.exec(value);
+  }
+  return traits;
+}
+
+function sanitizeActionTraits(currentTraits, description) {
+  const validTraits = getValidActionTraits();
+  if (validTraits.size === 0) {
+    return Array.isArray(currentTraits) ? currentTraits : [];
+  }
+
+  const candidates = [];
+  if (Array.isArray(currentTraits)) candidates.push(...currentTraits);
+  candidates.push(...extractTraitsFromDescription(description, validTraits));
+
+  const normalized = [];
+  for (const trait of candidates) {
+    const key = normalizeTraitKey(trait);
+    if (key && validTraits.has(key) && !normalized.includes(key)) {
+      normalized.push(key);
+    }
+  }
+  return normalized;
+}
+
 function getActionImage(actionType, actions) {
   if (actionType === "action") {
     if (actions === 1) return "systems/pf2e/icons/actions/OneAction.webp";
@@ -208,9 +259,70 @@ function isItemActivationsGeneratedAction(item) {
   return item?.type === "action" && !!item?.flags?.[ITEM_ACTIVATIONS_ID]?.grantedBy;
 }
 
+function shouldApplyItemActivationsFix() {
+  return (
+    game.settings.get(MODULE_ID, "itemActivationsRuFix") &&
+    game.modules.get(ITEM_ACTIVATIONS_ID)?.active
+  );
+}
+
+function sanitizeItemActivationItemData(rawItem) {
+  if (!isItemActivationsGeneratedAction(rawItem)) return rawItem;
+
+  const item = foundry.utils.deepClone(rawItem);
+  item.system ??= {};
+  item.system.traits ??= {};
+  item.system.actionType ??= {};
+  item.system.actions ??= {};
+
+  const description = item.system?.description?.value ?? "";
+  item.system.traits.value = sanitizeActionTraits(item.system?.traits?.value, description);
+
+  const parsedAction = parseActionTypeFromDescription(description);
+  if (parsedAction) {
+    item.system.actionType.value = parsedAction.type;
+    if (parsedAction.actions !== null) {
+      item.system.actions.value = parsedAction.actions;
+    }
+    const image = getActionImage(parsedAction.type, parsedAction.actions);
+    if (image) item.img = image;
+  }
+
+  const hasFrequency = !!item.system?.frequency?.per && item.system?.frequency?.max != null;
+  if (!hasFrequency) {
+    const parsedFrequency = parseFrequencyFromDescription(description);
+    if (parsedFrequency) {
+      item.system.frequency = parsedFrequency;
+    }
+  }
+
+  return item;
+}
+
+function sanitizeItemActivationCreateData(data) {
+  if (!Array.isArray(data) || data.length === 0) return data;
+  return data.map((itemData) => sanitizeItemActivationItemData(itemData));
+}
+
+function installItemActivationsCreatePatch() {
+  if (actorCreateEmbeddedDocumentsPatched) return;
+  const actorProto = CONFIG?.Actor?.documentClass?.prototype ?? Actor?.prototype;
+  if (!actorProto || typeof actorProto.createEmbeddedDocuments !== "function") return;
+
+  const originalCreateEmbeddedDocuments = actorProto.createEmbeddedDocuments;
+  actorProto.createEmbeddedDocuments = async function createEmbeddedDocumentsPatched(embeddedName, data, operation) {
+    let payload = data;
+    if (embeddedName === "Item" && shouldApplyItemActivationsFix()) {
+      payload = sanitizeItemActivationCreateData(data);
+    }
+    return originalCreateEmbeddedDocuments.call(this, embeddedName, payload, operation);
+  };
+
+  actorCreateEmbeddedDocumentsPatched = true;
+}
+
 async function applyItemActivationsRussianFix(item, userId) {
-  if (!game.settings.get(MODULE_ID, "itemActivationsRuFix")) return;
-  if (!game.modules.get(ITEM_ACTIVATIONS_ID)?.active) return;
+  if (!shouldApplyItemActivationsFix()) return;
   if (!isItemActivationsGeneratedAction(item)) return;
   if (userId !== game.user.id) return;
 
@@ -274,6 +386,16 @@ Hooks.once("init", () => {
 });
 
 Hooks.once("ready", () => {
+  installItemActivationsCreatePatch();
+
+  Hooks.on("createItem", async (item, _options, userId) => {
+    try {
+      await applyItemActivationsRussianFix(item, userId);
+    } catch (error) {
+      console.warn(`[${MODULE_ID}] Failed to apply Item Activations RU fix`, error);
+    }
+  });
+
   if (!game.modules.get(TOOLBELT_ID)?.active) return;
   if (!game.modules.get(AUTOMATION_ID)?.active) return;
 
@@ -288,14 +410,6 @@ Hooks.once("ready", () => {
       scrollChatToBottom();
       updateChatBottomState();
     });
-  });
-
-  Hooks.on("createItem", async (item, _options, userId) => {
-    try {
-      await applyItemActivationsRussianFix(item, userId);
-    } catch (error) {
-      console.warn(`[${MODULE_ID}] Failed to apply Item Activations RU fix`, error);
-    }
   });
 
   game.socket.on(SOCKET, (payload) => {

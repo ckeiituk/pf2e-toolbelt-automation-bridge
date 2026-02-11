@@ -292,15 +292,18 @@ function shouldApplyTargetHelperActionRowsFix() {
 
 function getTargetHelperActionRowsFixCss() {
   return `
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied,
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied * {
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied,
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied * {
       writing-mode: horizontal-tb !important;
       text-orientation: mixed !important;
       white-space: nowrap;
     }
 
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied button {
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied button {
       --button-size: auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       width: auto;
       min-width: 7em;
       height: auto;
@@ -313,8 +316,8 @@ function getTargetHelperActionRowsFixCss() {
       filter: none;
     }
 
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied button img,
-    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied button i {
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied button img,
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied button i {
       display: none !important;
     }
   `;
@@ -514,7 +517,7 @@ Hooks.once("init", () => {
   });
   game.settings.register(MODULE_ID, "targetHelperActionRowsFix", {
     name: "Target Helper Applied Label Fix",
-    hint: "Optional compatibility patch: keep the Applied label readable in Target Helper action rows.",
+    hint: "Optional compatibility patch: keep the Applied label readable in Target Helper small rows.",
     scope: "world",
     config: true,
     type: Boolean,

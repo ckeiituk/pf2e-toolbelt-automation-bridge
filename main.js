@@ -425,6 +425,36 @@ function setLinkedMacroFlagValue(spell, path, value) {
   }
 }
 
+function resolveSpellDocumentForCast(entry, spell) {
+  if (!spell) return null;
+  if (spell?.documentName === "Item" && spell?.type === "spell") {
+    return spell;
+  }
+
+  const actorItems = entry?.actor?.items;
+  const spellId = String(spell?.id ?? spell?._id ?? "").trim();
+  if (spellId && actorItems?.get) {
+    const byId = actorItems.get(spellId);
+    if (byId?.documentName === "Item" && byId?.type === "spell") {
+      return byId;
+    }
+  }
+
+  const spellUuid = String(spell?.uuid ?? "").trim();
+  if (spellUuid && typeof fromUuidSync === "function") {
+    try {
+      const byUuid = fromUuidSync(spellUuid);
+      if (byUuid?.documentName === "Item" && byUuid?.type === "spell") {
+        return byUuid;
+      }
+    } catch (_error) {
+      // ignore and keep best-effort resolution
+    }
+  }
+
+  return null;
+}
+
 function installMacroExecuteScopeBridge() {
   if (macroExecuteScopeBridgePatched) return;
 
@@ -496,27 +526,42 @@ function installToolbeltSpellCastLinkedBypass() {
       return originalCast.call(this, spell, options);
     }
 
-    const linkedFlagData = getLinkedMacroFlagData(spell);
+    const activeScope = getLastScopeFromStack();
+    const spellDoc = resolveSpellDocumentForCast(this, spell);
+    const linkedFlagData =
+      getLinkedMacroFlagData(spell) ??
+      getLinkedMacroFlagData(spellDoc) ??
+      getLinkedMacroFlagData(activeScope?.spell);
     if (!linkedFlagData) {
       return originalCast.call(this, spell, options);
     }
 
-    const activeScope = getLastScopeFromStack();
     const activeScopeSpellUuid = String(activeScope?.spell?.uuid ?? "");
-    const currentSpellUuid = String(spell?.uuid ?? "");
+    const currentSpellUuid = String(spellDoc?.uuid ?? spell?.uuid ?? "");
     const sameSpellScopeCast = !!activeScopeSpellUuid && activeScopeSpellUuid === currentSpellUuid;
 
     const isSilentCast = options?.message === false;
-    const silentMacroCast = isSilentCast && isInsideScriptMacroExecution();
+    const silentMacroCast = isSilentCast && (isInsideScriptMacroExecution() || isToolbeltCastScope(activeScope));
     if (!sameSpellScopeCast && !silentMacroCast) {
       return originalCast.call(this, spell, options);
     }
 
-    setLinkedMacroFlagValue(spell, linkedFlagData.path, null);
+    const targetsToPatch = new Set([spell, spellDoc, activeScope?.spell].filter(Boolean));
+    const previousValues = [];
+    for (const target of targetsToPatch) {
+      const previousValue = foundry.utils.getProperty(target, linkedFlagData.path);
+      if (previousValue !== undefined && previousValue !== null) {
+        previousValues.push({ target, previousValue });
+        setLinkedMacroFlagValue(target, linkedFlagData.path, null);
+      }
+    }
+
     try {
       return await originalCast.call(this, spell, options);
     } finally {
-      setLinkedMacroFlagValue(spell, linkedFlagData.path, linkedFlagData.value);
+      for (const { target, previousValue } of previousValues) {
+        setLinkedMacroFlagValue(target, linkedFlagData.path, previousValue);
+      }
     }
   };
 

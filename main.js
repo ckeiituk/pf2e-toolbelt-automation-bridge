@@ -9,6 +9,7 @@ const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
   "flags.actionable.linked",
   `flags.${TOOLBELT_ID}.linked`
 ];
+const ASYNC_SCOPE_FALLBACK_TTL_MS = 12000;
 
 let chatScrollElement = null;
 let chatAtBottom = false;
@@ -16,6 +17,8 @@ let actorCreateEmbeddedDocumentsPatched = false;
 let macroExecuteScopeBridgePatched = false;
 let spellCastLinkedMacroBypassPatched = false;
 const macroExecutionScopeStack = [];
+let macroExecutionFallbackScope = null;
+let macroExecutionFallbackScopeUntil = 0;
 
 const SAFE_SELF_EFFECT_UUID_PATTERNS = [
   /^Compendium\.pf2e\.equipment-effects\.Item\.[A-Za-z0-9]+$/i,
@@ -373,6 +376,36 @@ function isInsideScriptMacroExecution() {
   return macroExecutionScopeStack.length > 0;
 }
 
+function isToolbeltCastScope(scope) {
+  return hasScopeData(scope) && typeof scope?.cast === "function" && !!scope?.spell;
+}
+
+function rememberMacroExecutionFallbackScope(scope) {
+  if (!isToolbeltCastScope(scope)) return;
+  macroExecutionFallbackScope = scope;
+  macroExecutionFallbackScopeUntil = Date.now() + ASYNC_SCOPE_FALLBACK_TTL_MS;
+}
+
+function takeMacroExecutionFallbackScope() {
+  if (!macroExecutionFallbackScope) return null;
+  if (Date.now() > macroExecutionFallbackScopeUntil) {
+    macroExecutionFallbackScope = null;
+    macroExecutionFallbackScopeUntil = 0;
+    return null;
+  }
+  const scope = macroExecutionFallbackScope;
+  macroExecutionFallbackScope = null;
+  macroExecutionFallbackScopeUntil = 0;
+  return scope;
+}
+
+function isLikelyAsyncLinkedWrapperMacro(macroDoc) {
+  const name = String(macroDoc?.name ?? "");
+  if (/XDY DO_NOT_IMPORT/i.test(name)) return true;
+  const command = String(macroDoc?.command ?? "");
+  return /_executeMacroByName\s*\(|pack\.getDocuments\s*\(/i.test(command);
+}
+
 function getLinkedMacroFlagData(spell) {
   if (!spell) return null;
   for (const path of TOOLBELT_LINKED_MACRO_FLAG_PATHS) {
@@ -408,14 +441,30 @@ function installMacroExecuteScopeBridge() {
     const hasIncomingScopeArg = args.length > 0;
     const incomingScope = hasIncomingScopeArg ? args[0] : undefined;
     const incomingScopeHasData = hasScopeData(incomingScope);
-    const inheritedScope = bridgeEnabled ? getLastScopeFromStack() : null;
+    const inheritedScopeFromStack = bridgeEnabled ? getLastScopeFromStack() : null;
+    const inheritedScopeFromFallback =
+      bridgeEnabled &&
+      !inheritedScopeFromStack &&
+      !incomingScopeHasData &&
+      isLikelyAsyncLinkedWrapperMacro(this)
+        ? takeMacroExecutionFallbackScope()
+        : null;
+    const inheritedScope = inheritedScopeFromStack ?? inheritedScopeFromFallback;
 
     let effectiveScope = incomingScope;
     if (bridgeEnabled && !incomingScopeHasData && inheritedScope) {
       effectiveScope = inheritedScope;
     }
 
+    if (bridgeEnabled && incomingScopeHasData) {
+      rememberMacroExecutionFallbackScope(incomingScope);
+    }
+
     const trackedScope = hasScopeData(effectiveScope) ? effectiveScope : null;
+    if (bridgeEnabled && trackedScope) {
+      rememberMacroExecutionFallbackScope(trackedScope);
+    }
+
     macroExecutionScopeStack.push(trackedScope);
     try {
       if (!hasIncomingScopeArg && !hasScopeData(effectiveScope)) {
@@ -696,7 +745,7 @@ Hooks.once("init", () => {
   });
   game.settings.register(MODULE_ID, "toolbeltMacroScopeBridge", {
     name: "Toolbelt Nested Macro Scope Bridge",
-    hint: "Optional compatibility patch: nested script macros inherit Toolbelt spell scope (cast/options), so linked compendium wrappers keep slot/charge behavior.",
+    hint: "Optional compatibility patch: nested script macros inherit Toolbelt spell scope (cast/options), including async compendium-link wrappers, so linked casts keep slot/charge behavior.",
     scope: "world",
     config: true,
     type: Boolean,

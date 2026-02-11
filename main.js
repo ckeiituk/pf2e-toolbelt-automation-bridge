@@ -523,7 +523,12 @@ function installToolbeltActionableGetItemMacroSuppressionPatch() {
   if (canPatchPrototype) {
     const originalGetItemMacro = actionableProto.getItemMacro;
     actionableProto.getItemMacro = async function getItemMacroSuppressed(action) {
-      if (shouldApplyToolbeltSpellCastLinkedBypass() && consumeLinkedMacroSuppressionForSpell(action)) {
+      const inMacroContext = isInsideScriptMacroExecution() || isToolbeltCastScope(getLastScopeFromStack());
+      if (
+        shouldApplyToolbeltSpellCastLinkedBypass() &&
+        inMacroContext &&
+        consumeLinkedMacroSuppressionForSpell(action)
+      ) {
         return null;
       }
       return originalGetItemMacro.call(this, action);
@@ -535,7 +540,12 @@ function installToolbeltActionableGetItemMacroSuppressionPatch() {
 
   const originalGetItemMacro = actionableTool.getItemMacro.bind(actionableTool);
   actionableTool.getItemMacro = async function getItemMacroSuppressed(action) {
-    if (shouldApplyToolbeltSpellCastLinkedBypass() && consumeLinkedMacroSuppressionForSpell(action)) {
+    const inMacroContext = isInsideScriptMacroExecution() || isToolbeltCastScope(getLastScopeFromStack());
+    if (
+      shouldApplyToolbeltSpellCastLinkedBypass() &&
+      inMacroContext &&
+      consumeLinkedMacroSuppressionForSpell(action)
+    ) {
       return null;
     }
     return originalGetItemMacro(action);

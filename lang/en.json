@@ -26,11 +26,11 @@
         "hint": "Optional compatibility patch: keep Applied/effect-applied labels readable instead of vertical text."
       },
       "forceBarrageTargetDialogBridge": {
-        "name": "Force Barrage Target Dialog Enhancer",
-        "hint": "Optional UI patch: in Force Barrage target distribution dialogs, show token portrait, duplicate-name numbering, and hover-highlight/click-focus helpers."
+        "name": "Macro Target Dialog Enhancer",
+        "hint": "Optional UI patch: in macro target distribution dialogs, show token portrait, duplicate-name numbering, and hover-highlight/click-focus helpers."
       },
       "forceBarrageDialogMatchMode": {
-        "name": "Force Barrage Dialog Match Mode",
+        "name": "Target Dialog Match Mode",
         "hint": "Safe mode uses strict target-label checks; aggressive mode applies enhancement to any matching number-distribution target dialog.",
         "choices": {
           "safe": "Safe (Strict)",

@@ -493,21 +493,158 @@ function formatTokenGridPositionLabel(token) {
   return `x${gridX}, y${gridY}`;
 }
 
-function detectForceBarrageTargetDialog(root, userTargets) {
+function collectTargetDistributionRows(root) {
+  if (!(root instanceof HTMLElement)) return [];
+  return Array.from(root.querySelectorAll("table tr"))
+    .map((row) => ({
+      row,
+      input: row.querySelector("input[type='number']"),
+      label: row.querySelector("th label")
+    }))
+    .filter((entry) => entry.input instanceof HTMLInputElement && entry.label instanceof HTMLElement);
+}
+
+function extractTargetOrdinalFromLabelText(labelText) {
+  const match = String(labelText ?? "").match(/(?:target|цель)\s*#\s*(\d+)/i);
+  if (!match) return null;
+  const ordinal = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(ordinal) || ordinal < 1) return null;
+  return ordinal - 1;
+}
+
+function buildDialogTargetLookup(userTargets) {
+  const byId = new Map();
+  const byNormalizedName = new Map();
+
+  for (const target of userTargets) {
+    const id = String(target?.id ?? "").trim();
+    if (id) byId.set(id, target);
+
+    const normalizedName = normalizeText(target?.name ?? target?.document?.name ?? "");
+    if (!normalizedName) continue;
+
+    const list = byNormalizedName.get(normalizedName) ?? [];
+    list.push(target);
+    byNormalizedName.set(normalizedName, list);
+  }
+
+  const sortedNames = Array.from(byNormalizedName.keys()).sort((left, right) => right.length - left.length);
+  return { byId, byNormalizedName, sortedNames };
+}
+
+function resolveDialogRowTarget({
+  label,
+  rowIndex,
+  userTargets,
+  targetLookup,
+  usedTokenIds
+}) {
+  const existingId = String(label.querySelector("img[id]")?.id ?? "").trim();
+  if (existingId) {
+    const targetById = targetLookup.byId.get(existingId) ?? getCanvasTokenById(existingId);
+    if (targetById) return targetById;
+  }
+
+  const labelText = String(label.textContent ?? "");
+  const labelOrdinal = extractTargetOrdinalFromLabelText(labelText);
+  if (labelOrdinal !== null) {
+    const ordinalTarget = userTargets[labelOrdinal] ?? null;
+    if (ordinalTarget) {
+      const ordinalTargetId = String(ordinalTarget?.id ?? "").trim();
+      if (!ordinalTargetId || !usedTokenIds.has(ordinalTargetId)) {
+        return ordinalTarget;
+      }
+    }
+  }
+
+  const normalizedLabelText = normalizeText(labelText);
+  if (normalizedLabelText) {
+    for (const normalizedName of targetLookup.sortedNames) {
+      if (!normalizedName || normalizedName.length < 3) continue;
+      if (!normalizedLabelText.includes(normalizedName)) continue;
+
+      const candidates = targetLookup.byNormalizedName.get(normalizedName) ?? [];
+      const available = candidates.find((target) => {
+        const id = String(target?.id ?? "").trim();
+        return id ? !usedTokenIds.has(id) : true;
+      });
+      if (available) return available;
+      if (candidates[0]) return candidates[0];
+    }
+  }
+
+  const rowTarget = userTargets[rowIndex] ?? null;
+  if (rowTarget) {
+    const rowTargetId = String(rowTarget?.id ?? "").trim();
+    if (!rowTargetId || !usedTokenIds.has(rowTargetId)) {
+      return rowTarget;
+    }
+  }
+
+  return userTargets.find((target) => {
+    const id = String(target?.id ?? "").trim();
+    return id ? !usedTokenIds.has(id) : true;
+  }) ?? null;
+}
+
+function describeDialogTarget(target, rowIndex, totalByName, seenByName) {
+  const token = getCanvasTokenById(target?.id) ?? target;
+  const tokenId = String(token?.id ?? target?.id ?? "").trim();
+  if (!tokenId) return null;
+
+  const baseName = String(token?.name ?? target?.name ?? target?.document?.name ?? "").trim();
+  const fallbackName = baseName || `Target ${rowIndex + 1}`;
+  const seen = (seenByName.get(fallbackName) ?? 0) + 1;
+  seenByName.set(fallbackName, seen);
+  const total = totalByName.get(fallbackName) ?? 1;
+  const numberedName = total > 1 ? `${fallbackName} #${seen}` : fallbackName;
+  const gridPosition = formatTokenGridPositionLabel(token);
+  const displayName = gridPosition ? `${numberedName} (${gridPosition})` : numberedName;
+  const tokenImage = String(token?.document?.texture?.src ?? token?.texture?.src ?? "").trim();
+
+  return {
+    token,
+    tokenId,
+    displayName,
+    tokenImage
+  };
+}
+
+function createTargetDialogLabelContent({ tokenId, tokenImage, displayName }) {
+  const content = document.createElement("span");
+  content.className = "bridge-force-barrage-target-label";
+  content.dataset.tokenId = tokenId;
+
+  if (tokenImage) {
+    const icon = document.createElement("img");
+    icon.className = "bridge-force-barrage-target-icon";
+    icon.src = tokenImage;
+    icon.alt = displayName;
+    content.append(icon);
+  }
+
+  const text = document.createElement("span");
+  text.className = "bridge-force-barrage-target-name";
+  text.textContent = displayName;
+  content.append(text);
+
+  return content;
+}
+
+function detectForceBarrageTargetDialog(root, userTargets, dialogTitle = "") {
   if (!(root instanceof HTMLElement)) return { matched: false, reason: "no-root" };
   const mode = getForceBarrageDialogMatchMode();
 
-  const distributionInputs = Array.from(root.querySelectorAll("input[id$='qd']"));
-  if (distributionInputs.length === 0) return { matched: false, reason: "no-qd-inputs" };
+  const targetRows = collectTargetDistributionRows(root);
+  if (targetRows.length === 0) return { matched: false, reason: "no-target-rows" };
   if (!root.querySelector("table")) return { matched: false, reason: "no-table" };
   if (root.querySelector("select[id$='qd']")) return { matched: false, reason: "contains-select" };
   if (root.querySelector("input[type='checkbox'][id$='qd']")) return { matched: false, reason: "contains-checkbox" };
-  if (distributionInputs.some((input) => input.type !== "number")) return { matched: false, reason: "non-number-input" };
-  if (distributionInputs.length !== userTargets.length) {
+  if (targetRows.length !== userTargets.length) {
     return {
       matched: false,
       reason: "input-target-count-mismatch",
-      distributionInputCount: distributionInputs.length,
+      distributionInputCount: targetRows.length,
       targetCount: userTargets.length
     };
   }
@@ -522,8 +659,13 @@ function detectForceBarrageTargetDialog(root, userTargets) {
       .filter(Boolean)
   );
 
-  const labels = Array.from(root.querySelectorAll("table tr th label"));
+  const labels = targetRows.map((entry) => entry.label);
   const hasTargetFigcaption = labels.some((label) => /(target|цель)\s*#\d+/i.test(label.textContent ?? ""));
+  const targetIdSet = new Set(userTargets.map((target) => String(target?.id ?? "").trim()).filter(Boolean));
+  const hasTargetIdMatch = labels.some((label) => {
+    const id = String(label.querySelector("img[id]")?.id ?? "").trim();
+    return id ? targetIdSet.has(id) : false;
+  });
   const hasTargetNameMatch = labels.some((label) => {
     const text = String(label.textContent ?? "").trim().toLowerCase();
     if (!text) return false;
@@ -532,9 +674,12 @@ function detectForceBarrageTargetDialog(root, userTargets) {
     }
     return false;
   });
+  const hasTitleHint = /(target|цель|distribution|распредел|barrage|missile|шквал)/i.test(String(dialogTitle ?? ""));
 
   if (hasTargetFigcaption) return { matched: true, reason: "target-figcaption" };
+  if (hasTargetIdMatch) return { matched: true, reason: "target-id-match" };
   if (hasTargetNameMatch) return { matched: true, reason: "target-name-match" };
+  if (hasTitleHint) return { matched: true, reason: "title-hint-match" };
   return { matched: false, reason: "no-target-label-match" };
 }
 
@@ -547,7 +692,7 @@ function enhanceForceBarrageTargetDialog(app, html) {
 
   const userTargets = Array.from(game.user?.targets ?? []);
   if (userTargets.length === 0) return;
-  const matchResult = detectForceBarrageTargetDialog(root, userTargets);
+  const matchResult = detectForceBarrageTargetDialog(root, userTargets, app?.title ?? "");
   if (!matchResult.matched) {
     bridgeDebug("skip dialog enhancement", {
       title: String(app?.title ?? ""),
@@ -561,12 +706,12 @@ function enhanceForceBarrageTargetDialog(app, html) {
     mode: getForceBarrageDialogMatchMode()
   });
 
-  const targetRows = Array.from(root.querySelectorAll("table tr")).filter((row) =>
-    row.querySelector("input[type='number'][id$='qd']")
-  );
+  const targetRows = collectTargetDistributionRows(root);
   if (targetRows.length === 0) return;
 
   root.dataset.bridgeForceBarrageDialogPatched = "true";
+  const targetLookup = buildDialogTargetLookup(userTargets);
+  const usedTokenIds = new Set();
 
   const totalByName = new Map();
   for (const target of userTargets) {
@@ -577,65 +722,83 @@ function enhanceForceBarrageTargetDialog(app, html) {
   const indexByName = new Map();
 
   for (let rowIndex = 0; rowIndex < targetRows.length; rowIndex += 1) {
-    const row = targetRows[rowIndex];
-    const label = row.querySelector("th label");
-    if (!(label instanceof HTMLElement)) continue;
-
-    const existingId = String(label.querySelector("img[id]")?.id ?? "").trim();
-    const target = existingId
-      ? getCanvasTokenById(existingId)
-      : userTargets[rowIndex] ?? null;
+    const { label } = targetRows[rowIndex];
+    const target = resolveDialogRowTarget({
+      label,
+      rowIndex,
+      userTargets,
+      targetLookup,
+      usedTokenIds
+    });
     if (!target) continue;
 
-    const token = getCanvasTokenById(target.id) ?? target;
-    const tokenId = String(token?.id ?? target?.id ?? "").trim();
-    if (!tokenId) continue;
-
-    const baseName = String(token?.name ?? target?.name ?? target?.document?.name ?? `Target ${rowIndex + 1}`).trim();
-    const fallbackName = baseName || `Target ${rowIndex + 1}`;
-    const seen = (indexByName.get(fallbackName) ?? 0) + 1;
-    indexByName.set(fallbackName, seen);
-    const total = totalByName.get(fallbackName) ?? 1;
-    const numbered = total > 1 ? `${fallbackName} #${seen}` : fallbackName;
-    const gridPosition = formatTokenGridPositionLabel(token);
-    const displayName = gridPosition ? `${numbered} (${gridPosition})` : numbered;
-    const tokenImage = String(token?.document?.texture?.src ?? token?.texture?.src ?? "").trim();
-
-    const content = document.createElement("span");
-    content.className = "bridge-force-barrage-target-label";
-    content.dataset.tokenId = tokenId;
-
-    if (tokenImage) {
-      const icon = document.createElement("img");
-      icon.className = "bridge-force-barrage-target-icon";
-      icon.src = tokenImage;
-      icon.alt = displayName;
-      content.append(icon);
-    }
-
-    const text = document.createElement("span");
-    text.className = "bridge-force-barrage-target-name";
-    text.textContent = displayName;
-    content.append(text);
+    const targetData = describeDialogTarget(target, rowIndex, totalByName, indexByName);
+    if (!targetData) continue;
+    usedTokenIds.add(targetData.tokenId);
+    const content = createTargetDialogLabelContent(targetData);
 
     label.replaceChildren(content);
     label.classList.add("bridge-force-barrage-target-label-host");
-    label.title = displayName;
+    label.title = targetData.displayName;
 
     if (label.dataset.bridgeTokenHoverBound !== "true") {
       label.dataset.bridgeTokenHoverBound = "true";
       label.addEventListener("mouseenter", () => {
-        setDialogTokenHover(tokenId, true);
+        setDialogTokenHover(targetData.tokenId, true);
       });
       label.addEventListener("mouseleave", () => {
-        setDialogTokenHover(tokenId, false);
+        setDialogTokenHover(targetData.tokenId, false);
       });
       label.addEventListener("click", (event) => {
         event.preventDefault();
-        focusDialogToken(tokenId);
+        focusDialogToken(targetData.tokenId);
       });
     }
   }
+}
+
+function buildTargetDistributionQuickDialogRows(targets, options = {}) {
+  const targetList = Array.from(targets ?? []);
+  const defaultValue = Number.isFinite(options.defaultValue) ? options.defaultValue : 1;
+  const totalByName = new Map();
+  const seenByName = new Map();
+
+  for (const target of targetList) {
+    const name = String(target?.name ?? target?.document?.name ?? "").trim();
+    if (!name) continue;
+    totalByName.set(name, (totalByName.get(name) ?? 0) + 1);
+  }
+
+  return targetList.map((target, rowIndex) => {
+    const targetData = describeDialogTarget(target, rowIndex, totalByName, seenByName);
+    const fallbackLabel = String(target?.name ?? target?.document?.name ?? `Target ${rowIndex + 1}`).trim();
+
+    let label = fallbackLabel || `Target ${rowIndex + 1}`;
+    if (targetData) {
+      const content = createTargetDialogLabelContent(targetData);
+      label = content.outerHTML;
+    }
+
+    return {
+      label,
+      type: "number",
+      options: defaultValue
+    };
+  });
+}
+
+function installBridgeModuleApi() {
+  const module = game.modules.get(MODULE_ID);
+  if (!module) return;
+
+  const currentApi = module.api && typeof module.api === "object" ? module.api : {};
+  module.api = {
+    ...currentApi,
+    focusTokenById: focusDialogToken,
+    hoverTokenById: setDialogTokenHover,
+    buildTargetDistributionQuickDialogRows,
+    enhanceTargetDistributionDialog: ({ app, html }) => enhanceForceBarrageTargetDialog(app ?? null, html)
+  };
 }
 
 function formatEffectAppliedMessage(html) {
@@ -829,6 +992,7 @@ Hooks.once("init", () => {
 Hooks.once("ready", () => {
   const toolbeltBridgeInstance = getToolbeltBridge();
   toolbeltBridgeInstance.checkToolbeltCompatibility();
+  installBridgeModuleApi();
   installItemActivationsCreatePatch();
   refreshTargetHelperActionRowsFixStyle();
   refreshForceBarrageTargetDialogBridgeStyle();
@@ -840,7 +1004,7 @@ Hooks.once("ready", () => {
     try {
       enhanceForceBarrageTargetDialog(app, html);
     } catch (error) {
-      console.warn(`[${MODULE_ID}] Failed to enhance Force Barrage target dialog`, error);
+      console.warn(`[${MODULE_ID}] Failed to enhance target distribution dialog`, error);
     }
   });
 

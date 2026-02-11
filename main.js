@@ -846,7 +846,7 @@ function installMacroExecuteScopeBridge() {
   const originalExecute = macroProto.execute;
   macroProto.execute = async function macroExecuteScopeBridge(...args) {
     if (this?.type !== "script") {
-      return originalExecute.apply(this, args);
+      return await originalExecute.apply(this, args);
     }
 
     const bridgeEnabled = shouldApplyToolbeltMacroScopeBridge();
@@ -883,14 +883,14 @@ function installMacroExecuteScopeBridge() {
     macroExecutionScopeStack.push(trackedScope);
     try {
       if (!hasIncomingScopeArg && !hasScopeData(effectiveScope)) {
-        return originalExecute.apply(this, args);
+        return await originalExecute.apply(this, args);
       }
 
       const forwardedArgs = hasIncomingScopeArg
         ? [effectiveScope, ...args.slice(1)]
         : [effectiveScope];
 
-      return originalExecute.apply(this, forwardedArgs);
+      return await originalExecute.apply(this, forwardedArgs);
     } finally {
       macroExecutionScopeStack.pop();
     }

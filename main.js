@@ -9,6 +9,8 @@ const TOOLBELT_ACTION_ROWS_FIX_STYLE_ID = `${MODULE_ID}-toolbelt-action-rows-fix
 let chatScrollElement = null;
 let chatAtBottom = false;
 let actorCreateEmbeddedDocumentsPatched = false;
+let macroExecuteScopeBridgePatched = false;
+const macroExecutionScopeStack = [];
 
 const SAFE_SELF_EFFECT_UUID_PATTERNS = [
   /^Compendium\.pf2e\.equipment-effects\.Item\.[A-Za-z0-9]+$/i,
@@ -290,6 +292,13 @@ function shouldApplyTargetHelperActionRowsFix() {
   );
 }
 
+function shouldApplyToolbeltMacroScopeBridge() {
+  return (
+    game.settings.get(MODULE_ID, "toolbeltMacroScopeBridge") &&
+    game.modules.get(TOOLBELT_ID)?.active
+  );
+}
+
 function getTargetHelperActionRowsFixCss() {
   return `
     .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied,
@@ -359,6 +368,64 @@ function refreshTargetHelperActionRowsFixStyle() {
   style.id = TOOLBELT_ACTION_ROWS_FIX_STYLE_ID;
   style.textContent = getTargetHelperActionRowsFixCss();
   document.head.append(style);
+}
+
+function isPlainObjectScope(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasScopeData(value) {
+  return isPlainObjectScope(value) && Object.keys(value).length > 0;
+}
+
+function getLastScopeFromStack() {
+  for (let index = macroExecutionScopeStack.length - 1; index >= 0; index -= 1) {
+    const scope = macroExecutionScopeStack[index];
+    if (hasScopeData(scope)) return scope;
+  }
+  return null;
+}
+
+function installMacroExecuteScopeBridge() {
+  if (macroExecuteScopeBridgePatched) return;
+
+  const macroProto = CONFIG?.Macro?.documentClass?.prototype ?? Macro?.prototype;
+  if (!macroProto || typeof macroProto.execute !== "function") return;
+
+  const originalExecute = macroProto.execute;
+  macroProto.execute = async function macroExecuteScopeBridge(...args) {
+    if (this?.type !== "script") {
+      return originalExecute.apply(this, args);
+    }
+
+    const bridgeEnabled = shouldApplyToolbeltMacroScopeBridge();
+    const hasIncomingScopeArg = args.length > 0;
+    const incomingScope = hasIncomingScopeArg ? args[0] : undefined;
+    const incomingScopeHasData = hasScopeData(incomingScope);
+
+    let effectiveScope = incomingScope;
+    if (bridgeEnabled && !incomingScopeHasData) {
+      effectiveScope = getLastScopeFromStack() ?? {};
+    }
+
+    const trackedScope = hasScopeData(effectiveScope) ? effectiveScope : null;
+    macroExecutionScopeStack.push(trackedScope);
+    try {
+      if (!hasIncomingScopeArg && !bridgeEnabled) {
+        return originalExecute.apply(this, args);
+      }
+
+      const forwardedArgs = hasIncomingScopeArg
+        ? [effectiveScope, ...args.slice(1)]
+        : [effectiveScope];
+
+      return originalExecute.apply(this, forwardedArgs);
+    } finally {
+      macroExecutionScopeStack.pop();
+    }
+  };
+
+  macroExecuteScopeBridgePatched = true;
 }
 
 function formatEffectAppliedMessage(html) {
@@ -581,11 +648,20 @@ Hooks.once("init", () => {
       refreshTargetHelperActionRowsFixStyle();
     }
   });
+  game.settings.register(MODULE_ID, "toolbeltMacroScopeBridge", {
+    name: "Toolbelt Nested Macro Scope Bridge",
+    hint: "Optional compatibility patch: nested script macros inherit Toolbelt spell scope (cast/options), so linked compendium wrappers keep slot/charge behavior.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: true
+  });
 });
 
 Hooks.once("ready", () => {
   installItemActivationsCreatePatch();
   refreshTargetHelperActionRowsFixStyle();
+  installMacroExecuteScopeBridge();
 
   Hooks.on("createItem", async (item, _options, userId) => {
     try {

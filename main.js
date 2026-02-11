@@ -671,18 +671,20 @@ function installToolbeltSpellCastLinkedBypass() {
 
   const originalCast = spellcastingProto.cast;
   spellcastingProto.cast = async function spellCastLinkedBypass(spell, options = {}) {
+    const spellDoc = resolveSpellDocumentForCast(this, spell);
+    const castSpell = spellDoc ?? spell;
+
     if (!shouldApplyToolbeltSpellCastLinkedBypass()) {
-      return originalCast.call(this, spell, options);
+      return originalCast.call(this, castSpell, options);
     }
 
     const activeScope = getLastScopeFromStack();
-    const spellDoc = resolveSpellDocumentForCast(this, spell);
     const linkedFlagData =
       getLinkedMacroFlagData(spell) ??
       getLinkedMacroFlagData(spellDoc) ??
       getLinkedMacroFlagData(activeScope?.spell);
     if (!linkedFlagData) {
-      return originalCast.call(this, spell, options);
+      return originalCast.call(this, castSpell, options);
     }
 
     const activeScopeSpellUuid = String(activeScope?.spell?.uuid ?? "");
@@ -692,7 +694,7 @@ function installToolbeltSpellCastLinkedBypass() {
     const isSilentCast = options?.message === false;
     const silentMacroCast = isSilentCast && (isInsideScriptMacroExecution() || isToolbeltCastScope(activeScope));
     if (!sameSpellScopeCast && !silentMacroCast) {
-      return originalCast.call(this, spell, options);
+      return originalCast.call(this, castSpell, options);
     }
 
     const targetsToPatch = new Set([spell, spellDoc, activeScope?.spell].filter(Boolean));
@@ -706,7 +708,7 @@ function installToolbeltSpellCastLinkedBypass() {
     }
 
     try {
-      return await originalCast.call(this, spell, options);
+      return await originalCast.call(this, castSpell, options);
     } finally {
       for (const { target, previousValue } of previousValues) {
         setLinkedMacroFlagValue(target, linkedFlagData.path, previousValue);

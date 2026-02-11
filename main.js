@@ -320,6 +320,30 @@ function getTargetHelperActionRowsFixCss() {
     .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied button i {
       display: none !important;
     }
+
+    .chat-message .message-content .effect-applied,
+    .chat-message .message-content .effect-applied * {
+      writing-mode: horizontal-tb !important;
+      text-orientation: mixed !important;
+      white-space: normal !important;
+      line-height: 1.2;
+    }
+
+    .chat-message .message-content .effect-applied {
+      display: inline-block !important;
+      max-width: 100%;
+      overflow-wrap: anywhere;
+    }
+
+    .chat-message .message-content :is(button, a, span, div, li):has(> .effect-applied) {
+      width: auto !important;
+      min-width: 0 !important;
+      height: auto !important;
+      min-height: 0 !important;
+      white-space: normal !important;
+      writing-mode: horizontal-tb !important;
+      text-orientation: mixed !important;
+    }
   `;
 }
 
@@ -516,8 +540,8 @@ Hooks.once("init", () => {
     default: false
   });
   game.settings.register(MODULE_ID, "targetHelperActionRowsFix", {
-    name: "Target Helper Applied Label Fix",
-    hint: "Optional compatibility patch: keep the Applied label readable in Target Helper small rows.",
+    name: "Applied Label Layout Fix",
+    hint: "Optional compatibility patch: keep Applied/effect-applied labels readable instead of vertical text.",
     scope: "world",
     config: true,
     type: Boolean,

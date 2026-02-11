@@ -12,6 +12,8 @@ const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
 const ASYNC_SCOPE_FALLBACK_TTL_MS = 12000;
 const TOOLBELT_LINKED_SUPPRESSION_TTL_MS = 30000;
 const TOOLBELT_LINKED_SUPPRESSION_USES = 3;
+const TOOLBELT_ACTIONABLE_PATCH_RETRY_MS = 250;
+const TOOLBELT_ACTIONABLE_PATCH_MAX_RETRIES = 40;
 
 let chatScrollElement = null;
 let chatAtBottom = false;
@@ -19,6 +21,8 @@ let actorCreateEmbeddedDocumentsPatched = false;
 let macroExecuteScopeBridgePatched = false;
 let spellCastLinkedMacroBypassPatched = false;
 let toolbeltGetItemMacroSuppressionPatched = false;
+let toolbeltGetItemMacroSuppressionPatchIntervalId = null;
+let toolbeltGetItemMacroSuppressionPatchRetries = 0;
 const macroExecutionScopeStack = [];
 let macroExecutionFallbackScope = null;
 let macroExecutionFallbackScopeUntil = 0;
@@ -488,10 +492,46 @@ function consumeLinkedMacroSuppressionForSpell(spell) {
   return false;
 }
 
+function resolveToolbeltActionableTool() {
+  const byModule = game.modules.get(TOOLBELT_ID)?.dev?.tools?.actionable;
+  if (byModule && typeof byModule.getItemMacro === "function") return byModule;
+
+  const byGameContext = game.toolbelt?.dev?.tools?.actionable;
+  if (byGameContext && typeof byGameContext.getItemMacro === "function") return byGameContext;
+
+  return null;
+}
+
 function installToolbeltActionableGetItemMacroSuppressionPatch() {
-  if (toolbeltGetItemMacroSuppressionPatched) return;
-  const actionableTool = game.modules.get(TOOLBELT_ID)?.dev?.tools?.actionable;
-  if (!actionableTool || typeof actionableTool.getItemMacro !== "function") return;
+  if (toolbeltGetItemMacroSuppressionPatched) return true;
+
+  const actionableTool = resolveToolbeltActionableTool();
+  if (!actionableTool) return false;
+
+  const actionableProto = Object.getPrototypeOf(actionableTool);
+  const canPatchPrototype = actionableProto && typeof actionableProto.getItemMacro === "function";
+
+  if (canPatchPrototype && actionableProto.__bridgeToolbeltGetItemMacroPatched) {
+    toolbeltGetItemMacroSuppressionPatched = true;
+    return true;
+  }
+  if (!canPatchPrototype && actionableTool.__bridgeToolbeltGetItemMacroPatched) {
+    toolbeltGetItemMacroSuppressionPatched = true;
+    return true;
+  }
+
+  if (canPatchPrototype) {
+    const originalGetItemMacro = actionableProto.getItemMacro;
+    actionableProto.getItemMacro = async function getItemMacroSuppressed(action) {
+      if (shouldApplyToolbeltSpellCastLinkedBypass() && consumeLinkedMacroSuppressionForSpell(action)) {
+        return null;
+      }
+      return originalGetItemMacro.call(this, action);
+    };
+    actionableProto.__bridgeToolbeltGetItemMacroPatched = true;
+    toolbeltGetItemMacroSuppressionPatched = true;
+    return true;
+  }
 
   const originalGetItemMacro = actionableTool.getItemMacro.bind(actionableTool);
   actionableTool.getItemMacro = async function getItemMacroSuppressed(action) {
@@ -500,8 +540,35 @@ function installToolbeltActionableGetItemMacroSuppressionPatch() {
     }
     return originalGetItemMacro(action);
   };
-
+  actionableTool.__bridgeToolbeltGetItemMacroPatched = true;
   toolbeltGetItemMacroSuppressionPatched = true;
+  return true;
+}
+
+function scheduleToolbeltActionableGetItemMacroSuppressionPatch() {
+  if (toolbeltGetItemMacroSuppressionPatched) return;
+
+  if (installToolbeltActionableGetItemMacroSuppressionPatch()) {
+    return;
+  }
+
+  if (toolbeltGetItemMacroSuppressionPatchIntervalId !== null) return;
+
+  toolbeltGetItemMacroSuppressionPatchRetries = 0;
+  toolbeltGetItemMacroSuppressionPatchIntervalId = window.setInterval(() => {
+    if (toolbeltGetItemMacroSuppressionPatched || installToolbeltActionableGetItemMacroSuppressionPatch()) {
+      window.clearInterval(toolbeltGetItemMacroSuppressionPatchIntervalId);
+      toolbeltGetItemMacroSuppressionPatchIntervalId = null;
+      return;
+    }
+
+    toolbeltGetItemMacroSuppressionPatchRetries += 1;
+    if (toolbeltGetItemMacroSuppressionPatchRetries >= TOOLBELT_ACTIONABLE_PATCH_MAX_RETRIES) {
+      window.clearInterval(toolbeltGetItemMacroSuppressionPatchIntervalId);
+      toolbeltGetItemMacroSuppressionPatchIntervalId = null;
+      console.warn(`[${MODULE_ID}] Failed to patch Toolbelt actionable.getItemMacro after retries`);
+    }
+  }, TOOLBELT_ACTIONABLE_PATCH_RETRY_MS);
 }
 
 function resolveSpellDocumentForCast(entry, spell) {
@@ -893,7 +960,7 @@ Hooks.once("ready", () => {
   refreshTargetHelperActionRowsFixStyle();
   installMacroExecuteScopeBridge();
   installToolbeltSpellCastLinkedBypass();
-  installToolbeltActionableGetItemMacroSuppressionPatch();
+  scheduleToolbeltActionableGetItemMacroSuppressionPatch();
 
   Hooks.on("createItem", async (item, _options, userId) => {
     try {

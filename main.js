@@ -1,3 +1,5 @@
+import { registerBridgeSettings } from "./register-settings.js";
+
 const MODULE_ID = "pf2e-toolbelt-automation-bridge";
 const TOOLBELT_ID = "pf2e-toolbelt";
 const AUTOMATION_ID = "patreon-v3";
@@ -16,6 +18,7 @@ const TOOLBELT_LINKED_SUPPRESSION_USES = 1;
 const TOOLBELT_ACTIONABLE_PATCH_RETRY_MS = 250;
 const TOOLBELT_ACTIONABLE_PATCH_MAX_RETRIES = 40;
 const TOOLBELT_ACTIONABLE_GET_ITEM_MACRO_PATH = "game.toolbelt.dev.tools.actionable.getItemMacro";
+const COMPAT_WARNING_PREFIX = `[${MODULE_ID}] Compatibility warning`;
 
 let chatScrollElement = null;
 let chatAtBottom = false;
@@ -25,9 +28,9 @@ let spellCastLinkedMacroBypassPatched = false;
 let toolbeltGetItemMacroSuppressionPatched = false;
 let toolbeltGetItemMacroSuppressionPatchIntervalId = null;
 let toolbeltGetItemMacroSuppressionPatchRetries = 0;
+const compatibilityWarningCodes = new Set();
 const macroExecutionScopeStack = [];
-let macroExecutionFallbackScope = null;
-let macroExecutionFallbackScopeUntil = 0;
+const macroExecutionFallbackScopes = [];
 const toolbeltLinkedMacroSuppressions = new Map();
 
 const SAFE_SELF_EFFECT_UUID_PATTERNS = [
@@ -314,6 +317,15 @@ function shouldApplyForceBarrageTargetDialogBridge() {
   return game.settings.get(MODULE_ID, "forceBarrageTargetDialogBridge");
 }
 
+function getForceBarrageDialogMatchMode() {
+  try {
+    const mode = String(game.settings.get(MODULE_ID, "forceBarrageDialogMatchMode") ?? "safe").trim();
+    return mode === "aggressive" ? "aggressive" : "safe";
+  } catch (_error) {
+    return "safe";
+  }
+}
+
 function shouldApplyToolbeltMacroScopeBridge() {
   return (
     game.settings.get(MODULE_ID, "toolbeltMacroScopeBridge") &&
@@ -343,6 +355,17 @@ function bridgeDebug(message, payload) {
     return;
   }
   console.debug(`[${MODULE_ID}] ${message}`, payload);
+}
+
+function warnBridgeCompatibility(code, message, details) {
+  if (compatibilityWarningCodes.has(code)) return;
+  compatibilityWarningCodes.add(code);
+
+  const text = `${COMPAT_WARNING_PREFIX}: ${message}`;
+  console.warn(text, details ?? null);
+  if (ui?.notifications?.warn) {
+    ui.notifications.warn(text);
+  }
 }
 
 function getTargetHelperActionRowsFixCss() {
@@ -476,16 +499,28 @@ function formatTokenGridPositionLabel(token) {
   return `x${gridX}, y${gridY}`;
 }
 
-function isLikelyForceBarrageTargetDialog(root, userTargets) {
-  if (!(root instanceof HTMLElement)) return false;
+function detectForceBarrageTargetDialog(root, userTargets) {
+  if (!(root instanceof HTMLElement)) return { matched: false, reason: "no-root" };
+  const mode = getForceBarrageDialogMatchMode();
 
   const distributionInputs = Array.from(root.querySelectorAll("input[id$='qd']"));
-  if (distributionInputs.length === 0) return false;
-  if (!root.querySelector("table")) return false;
-  if (root.querySelector("select[id$='qd']")) return false;
-  if (root.querySelector("input[type='checkbox'][id$='qd']")) return false;
-  if (distributionInputs.some((input) => input.type !== "number")) return false;
-  if (distributionInputs.length !== userTargets.length) return false;
+  if (distributionInputs.length === 0) return { matched: false, reason: "no-qd-inputs" };
+  if (!root.querySelector("table")) return { matched: false, reason: "no-table" };
+  if (root.querySelector("select[id$='qd']")) return { matched: false, reason: "contains-select" };
+  if (root.querySelector("input[type='checkbox'][id$='qd']")) return { matched: false, reason: "contains-checkbox" };
+  if (distributionInputs.some((input) => input.type !== "number")) return { matched: false, reason: "non-number-input" };
+  if (distributionInputs.length !== userTargets.length) {
+    return {
+      matched: false,
+      reason: "input-target-count-mismatch",
+      distributionInputCount: distributionInputs.length,
+      targetCount: userTargets.length
+    };
+  }
+
+  if (mode === "aggressive") {
+    return { matched: true, reason: "aggressive-structural-match" };
+  }
 
   const targetNameSet = new Set(
     userTargets
@@ -494,7 +529,7 @@ function isLikelyForceBarrageTargetDialog(root, userTargets) {
   );
 
   const labels = Array.from(root.querySelectorAll("table tr th label"));
-  const hasTargetFigcaption = labels.some((label) => /target\s*#\d+/i.test(label.textContent ?? ""));
+  const hasTargetFigcaption = labels.some((label) => /(target|цель)\s*#\d+/i.test(label.textContent ?? ""));
   const hasTargetNameMatch = labels.some((label) => {
     const text = String(label.textContent ?? "").trim().toLowerCase();
     if (!text) return false;
@@ -504,7 +539,9 @@ function isLikelyForceBarrageTargetDialog(root, userTargets) {
     return false;
   });
 
-  return hasTargetFigcaption || hasTargetNameMatch;
+  if (hasTargetFigcaption) return { matched: true, reason: "target-figcaption" };
+  if (hasTargetNameMatch) return { matched: true, reason: "target-name-match" };
+  return { matched: false, reason: "no-target-label-match" };
 }
 
 function enhanceForceBarrageTargetDialog(app, html) {
@@ -516,7 +553,19 @@ function enhanceForceBarrageTargetDialog(app, html) {
 
   const userTargets = Array.from(game.user?.targets ?? []);
   if (userTargets.length === 0) return;
-  if (!isLikelyForceBarrageTargetDialog(root, userTargets)) return;
+  const matchResult = detectForceBarrageTargetDialog(root, userTargets);
+  if (!matchResult.matched) {
+    bridgeDebug("skip dialog enhancement", {
+      title: String(app?.title ?? ""),
+      reason: matchResult.reason
+    });
+    return;
+  }
+  bridgeDebug("enhance dialog", {
+    title: String(app?.title ?? ""),
+    reason: matchResult.reason,
+    mode: getForceBarrageDialogMatchMode()
+  });
 
   const targetRows = Array.from(root.querySelectorAll("table tr")).filter((row) =>
     row.querySelector("input[type='number'][id$='qd']")
@@ -633,20 +682,71 @@ function isSameSpellReference(left, right) {
 
 function rememberMacroExecutionFallbackScope(scope) {
   if (!isToolbeltCastScope(scope)) return;
-  macroExecutionFallbackScope = scope;
-  macroExecutionFallbackScopeUntil = Date.now() + ASYNC_SCOPE_FALLBACK_TTL_MS;
+  cleanupMacroExecutionFallbackScopes();
+  const expiresAt = Date.now() + ASYNC_SCOPE_FALLBACK_TTL_MS;
+  const existingIndex = macroExecutionFallbackScopes.findIndex((entry) => entry.scope === scope);
+  if (existingIndex >= 0) {
+    macroExecutionFallbackScopes[existingIndex].expiresAt = Math.max(
+      Number(macroExecutionFallbackScopes[existingIndex]?.expiresAt ?? 0),
+      expiresAt
+    );
+    bridgeDebug("refresh fallback scope", {
+      spell: String(scope?.spell?.name ?? scope?.spell?.id ?? ""),
+      queueSize: macroExecutionFallbackScopes.length
+    });
+    return;
+  }
+
+  macroExecutionFallbackScopes.push({
+    scope,
+    expiresAt
+  });
+  bridgeDebug("enqueue fallback scope", {
+    spell: String(scope?.spell?.name ?? scope?.spell?.id ?? ""),
+    queueSize: macroExecutionFallbackScopes.length
+  });
+}
+
+function cleanupMacroExecutionFallbackScopes() {
+  if (macroExecutionFallbackScopes.length === 0) return;
+  const now = Date.now();
+  for (let index = macroExecutionFallbackScopes.length - 1; index >= 0; index -= 1) {
+    const entry = macroExecutionFallbackScopes[index];
+    if (!isToolbeltCastScope(entry?.scope) || Number(entry?.expiresAt ?? 0) <= now) {
+      macroExecutionFallbackScopes.splice(index, 1);
+    }
+  }
+}
+
+function findMacroExecutionFallbackScope(spell = null) {
+  cleanupMacroExecutionFallbackScopes();
+  if (macroExecutionFallbackScopes.length === 0) return null;
+
+  if (!spell) {
+    return macroExecutionFallbackScopes[0]?.scope ?? null;
+  }
+
+  for (let index = macroExecutionFallbackScopes.length - 1; index >= 0; index -= 1) {
+    const scope = macroExecutionFallbackScopes[index]?.scope;
+    if (isToolbeltCastScope(scope) && isSameSpellReference(spell, scope.spell)) {
+      return scope;
+    }
+  }
+
+  return null;
 }
 
 function takeMacroExecutionFallbackScope() {
-  if (!macroExecutionFallbackScope) return null;
-  if (Date.now() > macroExecutionFallbackScopeUntil) {
-    macroExecutionFallbackScope = null;
-    macroExecutionFallbackScopeUntil = 0;
-    return null;
+  cleanupMacroExecutionFallbackScopes();
+  if (macroExecutionFallbackScopes.length === 0) return null;
+  const entry = macroExecutionFallbackScopes.shift() ?? null;
+  const scope = entry?.scope ?? null;
+  if (scope) {
+    bridgeDebug("dequeue fallback scope", {
+      spell: String(scope?.spell?.name ?? scope?.spell?.id ?? ""),
+      queueSize: macroExecutionFallbackScopes.length
+    });
   }
-  const scope = macroExecutionFallbackScope;
-  macroExecutionFallbackScope = null;
-  macroExecutionFallbackScopeUntil = 0;
   return scope;
 }
 
@@ -763,22 +863,23 @@ function getToolbeltScopeForSuppression(spell) {
     return activeScope;
   }
 
-  if (
-    isToolbeltCastScope(macroExecutionFallbackScope) &&
-    Date.now() <= macroExecutionFallbackScopeUntil &&
-    isSameSpellReference(spell, macroExecutionFallbackScope.spell)
-  ) {
-    return macroExecutionFallbackScope;
-  }
-
-  return null;
+  return findMacroExecutionFallbackScope(spell);
 }
 
 function installToolbeltActionableGetItemMacroSuppressionPatch() {
   if (toolbeltGetItemMacroSuppressionPatched) return true;
 
   const actionableGetItemMacro = game?.toolbelt?.dev?.tools?.actionable?.getItemMacro;
-  if (typeof actionableGetItemMacro !== "function") return false;
+  if (typeof actionableGetItemMacro !== "function") {
+    warnBridgeCompatibility(
+      "toolbelt-actionable-missing",
+      `Expected Toolbelt API path missing: ${TOOLBELT_ACTIONABLE_GET_ITEM_MACRO_PATH}`,
+      {
+        toolbeltVersion: String(game.modules.get(TOOLBELT_ID)?.version ?? "unknown")
+      }
+    );
+    return false;
+  }
 
   const libWrapperRegistered = registerBridgeLibWrapper(
     TOOLBELT_ACTIONABLE_GET_ITEM_MACRO_PATH,
@@ -828,6 +929,10 @@ function scheduleToolbeltActionableGetItemMacroSuppressionPatch() {
       window.clearInterval(toolbeltGetItemMacroSuppressionPatchIntervalId);
       toolbeltGetItemMacroSuppressionPatchIntervalId = null;
       console.warn(`[${MODULE_ID}] Failed to patch Toolbelt actionable.getItemMacro after retries`);
+      warnBridgeCompatibility(
+        "toolbelt-actionable-patch-retries",
+        "Unable to install Toolbelt actionable.getItemMacro suppression patch after retries."
+      );
     }
   }, TOOLBELT_ACTIONABLE_PATCH_RETRY_MS);
 }
@@ -874,6 +979,36 @@ function registerBridgeLibWrapper(target, wrapper, type = "MIXED") {
   } catch (error) {
     console.warn(`[${MODULE_ID}] Failed to register libWrapper for ${target}`, error);
     return false;
+  }
+}
+
+function checkToolbeltCompatibility() {
+  if (!game.modules.get(TOOLBELT_ID)?.active) return;
+
+  if (!canUseLibWrapper()) {
+    warnBridgeCompatibility(
+      "libwrapper-missing",
+      "libWrapper is not available; bridge will use fallback prototype patches with higher conflict risk."
+    );
+  }
+
+  const actionableGetItemMacro = game?.toolbelt?.dev?.tools?.actionable?.getItemMacro;
+  if (typeof actionableGetItemMacro !== "function") {
+    warnBridgeCompatibility(
+      "toolbelt-actionable-shape",
+      `Toolbelt API not in expected shape: ${TOOLBELT_ACTIONABLE_GET_ITEM_MACRO_PATH}`,
+      {
+        toolbeltVersion: String(game.modules.get(TOOLBELT_ID)?.version ?? "unknown")
+      }
+    );
+  }
+
+  const spellcastingProto = CONFIG?.PF2E?.Item?.documentClasses?.spellcastingEntry?.prototype;
+  if (!spellcastingProto || typeof spellcastingProto.cast !== "function") {
+    warnBridgeCompatibility(
+      "pf2e-spellcasting-cast-missing",
+      "PF2E spellcastingEntry.cast was not found; linked-cast bypass cannot be installed."
+    );
   }
 }
 
@@ -1238,87 +1373,19 @@ async function applyItemActivationsRussianFix(item, userId) {
 }
 
 Hooks.once("init", () => {
-  game.settings.register(MODULE_ID, "proxyToGM", {
-    name: "Proxy To Active GM",
-    hint: "If enabled, non-GM clients send roll events to the active GM for automation.",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: true
-  });
-  game.settings.register(MODULE_ID, "autoScrollTargets", {
-    name: "Auto-Scroll Target Helper",
-    hint: "When chat is already at the bottom, keep it pinned when Target Helper expands a message.",
-    scope: "client",
-    config: true,
-    type: Boolean,
-    default: true
-  });
-  game.settings.register(MODULE_ID, "debugBridge", {
-    name: "Bridge Debug Logging",
-    hint: "Client-side debug logging for bridge patches (scope inheritance, suppression, and linked-cast bypass decisions).",
-    scope: "client",
-    config: true,
-    type: Boolean,
-    default: false
-  });
-  game.settings.register(MODULE_ID, "itemActivationsRuFix", {
-    name: "PF2e Item Activations RU Fix",
-    hint: "Optional compatibility patch: fix generated action type and frequency for Russian activation text.",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false
-  });
-  game.settings.register(MODULE_ID, "itemActivationsAutoSelfEffect", {
-    name: "PF2e Item Activations Auto-Link Self Effect",
-    hint: "Optional compatibility patch: link selfEffect from description only when one safe effect UUID is found.",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false
-  });
-  game.settings.register(MODULE_ID, "targetHelperActionRowsFix", {
-    name: "Applied Label Layout Fix",
-    hint: "Optional compatibility patch: keep Applied/effect-applied labels readable instead of vertical text.",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: false,
-    onChange: () => {
+  registerBridgeSettings({
+    moduleId: MODULE_ID,
+    onTargetHelperActionRowsFixChange: () => {
       refreshTargetHelperActionRowsFixStyle();
-    }
-  });
-  game.settings.register(MODULE_ID, "forceBarrageTargetDialogBridge", {
-    name: "Force Barrage Target Dialog Enhancer",
-    hint: "Optional UI patch: in Force Barrage target distribution dialogs, show token portrait, duplicate-name numbering, and hover-highlight/click-focus helpers.",
-    scope: "client",
-    config: true,
-    type: Boolean,
-    default: true,
-    onChange: () => {
+    },
+    onForceBarrageTargetDialogBridgeChange: () => {
       refreshForceBarrageTargetDialogBridgeStyle();
     }
-  });
-  game.settings.register(MODULE_ID, "toolbeltMacroScopeBridge", {
-    name: "Toolbelt Nested Macro Scope Bridge",
-    hint: "Optional compatibility patch: nested script macros inherit Toolbelt spell scope (cast/options), including async compendium-link wrappers, so linked casts keep slot/charge behavior.",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: true
-  });
-  game.settings.register(MODULE_ID, "toolbeltSpellCastLinkedBypass", {
-    name: "Toolbelt Spell Cast Linked-Macro Bypass",
-    hint: "Optional compatibility patch: when a linked spell macro internally casts, bypass one recursive linked-macro pass and suppress one actionable linked lookup to prevent duplicate dialogs and preserve slot/charge consumption.",
-    scope: "world",
-    config: true,
-    type: Boolean,
-    default: true
   });
 });
 
 Hooks.once("ready", () => {
+  checkToolbeltCompatibility();
   installItemActivationsCreatePatch();
   refreshTargetHelperActionRowsFixStyle();
   refreshForceBarrageTargetDialogBridgeStyle();

@@ -365,6 +365,10 @@ function getLastScopeFromStack() {
   return null;
 }
 
+function isInsideScriptMacroExecution() {
+  return macroExecutionScopeStack.length > 0;
+}
+
 function installMacroExecuteScopeBridge() {
   if (macroExecuteScopeBridgePatched) return;
 
@@ -430,7 +434,10 @@ function installToolbeltSpellCastLinkedBypass() {
     const activeScopeSpellUuid = String(activeScope?.spell?.uuid ?? "");
     const currentSpellUuid = String(spell?.uuid ?? "");
     const sameSpellScopeCast = !!activeScopeSpellUuid && activeScopeSpellUuid === currentSpellUuid;
-    if (!sameSpellScopeCast) {
+
+    const isSilentCast = options?.message === false;
+    const silentMacroCast = isSilentCast && isInsideScriptMacroExecution();
+    if (!sameSpellScopeCast && !silentMacroCast) {
       return originalCast.call(this, spell, options);
     }
 
@@ -675,7 +682,7 @@ Hooks.once("init", () => {
   });
   game.settings.register(MODULE_ID, "toolbeltSpellCastLinkedBypass", {
     name: "Toolbelt Spell Cast Linked-Macro Bypass",
-    hint: "Optional compatibility patch: when a linked spell macro internally casts the same spell, bypass one recursive linked-macro pass to prevent duplicate dialogs.",
+    hint: "Optional compatibility patch: when a linked spell macro internally casts, bypass one recursive linked-macro pass (same-scope or silent macro cast) to prevent duplicate dialogs.",
     scope: "world",
     config: true,
     type: Boolean,

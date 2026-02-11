@@ -4,6 +4,7 @@ const AUTOMATION_ID = "patreon-v3";
 const ITEM_ACTIVATIONS_ID = "pf2e-item-activations";
 const SOCKET = `module.${MODULE_ID}`;
 const CHAT_BOTTOM_EPSILON = 8;
+const TOOLBELT_ACTION_ROWS_FIX_STYLE_ID = `${MODULE_ID}-toolbelt-action-rows-fix`;
 
 let chatScrollElement = null;
 let chatAtBottom = false;
@@ -282,6 +283,57 @@ function shouldApplyItemActivationsCreateSanitizer() {
   return shouldApplyItemActivationsRuFix() || shouldAutoLinkItemActivationSelfEffect();
 }
 
+function shouldApplyTargetHelperActionRowsFix() {
+  return (
+    game.settings.get(MODULE_ID, "targetHelperActionRowsFix") &&
+    game.modules.get(TOOLBELT_ID)?.active
+  );
+}
+
+function getTargetHelperActionRowsFixCss() {
+  return `
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied,
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied * {
+      writing-mode: horizontal-tb !important;
+      text-orientation: mixed !important;
+      white-space: nowrap;
+    }
+
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied button {
+      --button-size: auto;
+      width: auto;
+      min-width: 7em;
+      height: auto;
+      min-height: 1.2em;
+      padding-inline: 0.35em;
+      white-space: nowrap;
+      writing-mode: horizontal-tb;
+      text-orientation: mixed;
+      line-height: 1.2;
+      filter: none;
+    }
+
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied button img,
+    .chat-message .message-content .pf2e-toolbelt-target-targetRows.pf2e-toolbelt-target-actionRows .target-row .damage-application.applied button i {
+      display: none !important;
+    }
+  `;
+}
+
+function refreshTargetHelperActionRowsFixStyle() {
+  const currentStyle = document.getElementById(TOOLBELT_ACTION_ROWS_FIX_STYLE_ID);
+  if (currentStyle) {
+    currentStyle.remove();
+  }
+
+  if (!shouldApplyTargetHelperActionRowsFix()) return;
+
+  const style = document.createElement("style");
+  style.id = TOOLBELT_ACTION_ROWS_FIX_STYLE_ID;
+  style.textContent = getTargetHelperActionRowsFixCss();
+  document.head.append(style);
+}
+
 function isSafeSelfEffectUuid(uuid) {
   return SAFE_SELF_EFFECT_UUID_PATTERNS.some((pattern) => pattern.test(uuid));
 }
@@ -460,10 +512,22 @@ Hooks.once("init", () => {
     type: Boolean,
     default: false
   });
+  game.settings.register(MODULE_ID, "targetHelperActionRowsFix", {
+    name: "Target Helper Applied Label Fix",
+    hint: "Optional compatibility patch: keep the Applied label readable in Target Helper action rows.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false,
+    onChange: () => {
+      refreshTargetHelperActionRowsFixStyle();
+    }
+  });
 });
 
 Hooks.once("ready", () => {
   installItemActivationsCreatePatch();
+  refreshTargetHelperActionRowsFixStyle();
 
   Hooks.on("createItem", async (item, _options, userId) => {
     try {

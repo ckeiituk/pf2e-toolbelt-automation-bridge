@@ -10,8 +10,8 @@ const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
   `flags.${TOOLBELT_ID}.linked`
 ];
 const ASYNC_SCOPE_FALLBACK_TTL_MS = 12000;
-const TOOLBELT_LINKED_SUPPRESSION_TTL_MS = 30000;
-const TOOLBELT_LINKED_SUPPRESSION_USES = 3;
+const TOOLBELT_LINKED_SUPPRESSION_TTL_MS = 4000;
+const TOOLBELT_LINKED_SUPPRESSION_USES = 1;
 const TOOLBELT_ACTIONABLE_PATCH_RETRY_MS = 250;
 const TOOLBELT_ACTIONABLE_PATCH_MAX_RETRIES = 40;
 
@@ -523,12 +523,7 @@ function installToolbeltActionableGetItemMacroSuppressionPatch() {
   if (canPatchPrototype) {
     const originalGetItemMacro = actionableProto.getItemMacro;
     actionableProto.getItemMacro = async function getItemMacroSuppressed(action) {
-      const inMacroContext = isInsideScriptMacroExecution() || isToolbeltCastScope(getLastScopeFromStack());
-      if (
-        shouldApplyToolbeltSpellCastLinkedBypass() &&
-        inMacroContext &&
-        consumeLinkedMacroSuppressionForSpell(action)
-      ) {
+      if (shouldApplyToolbeltSpellCastLinkedBypass() && consumeLinkedMacroSuppressionForSpell(action)) {
         return null;
       }
       return originalGetItemMacro.call(this, action);
@@ -540,12 +535,7 @@ function installToolbeltActionableGetItemMacroSuppressionPatch() {
 
   const originalGetItemMacro = actionableTool.getItemMacro.bind(actionableTool);
   actionableTool.getItemMacro = async function getItemMacroSuppressed(action) {
-    const inMacroContext = isInsideScriptMacroExecution() || isToolbeltCastScope(getLastScopeFromStack());
-    if (
-      shouldApplyToolbeltSpellCastLinkedBypass() &&
-      inMacroContext &&
-      consumeLinkedMacroSuppressionForSpell(action)
-    ) {
+    if (shouldApplyToolbeltSpellCastLinkedBypass() && consumeLinkedMacroSuppressionForSpell(action)) {
       return null;
     }
     return originalGetItemMacro(action);

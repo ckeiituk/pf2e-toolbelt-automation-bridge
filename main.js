@@ -10,6 +10,7 @@ let chatScrollElement = null;
 let chatAtBottom = false;
 let actorCreateEmbeddedDocumentsPatched = false;
 let macroExecuteScopeBridgePatched = false;
+let spellCastLinkedMacroBypassPatched = false;
 const macroExecutionScopeStack = [];
 
 const SAFE_SELF_EFFECT_UUID_PATTERNS = [
@@ -299,6 +300,13 @@ function shouldApplyToolbeltMacroScopeBridge() {
   );
 }
 
+function shouldApplyToolbeltSpellCastLinkedBypass() {
+  return (
+    game.settings.get(MODULE_ID, "toolbeltSpellCastLinkedBypass") &&
+    game.modules.get(TOOLBELT_ID)?.active
+  );
+}
+
 function getTargetHelperActionRowsFixCss() {
   return `
     .chat-message .message-content .pf2e-toolbelt-target-targetRows .target-row .damage-application.applied,
@@ -427,6 +435,43 @@ function installMacroExecuteScopeBridge() {
   };
 
   macroExecuteScopeBridgePatched = true;
+}
+
+function installToolbeltSpellCastLinkedBypass() {
+  if (spellCastLinkedMacroBypassPatched) return;
+
+  const spellcastingProto = CONFIG?.PF2E?.Item?.documentClasses?.spellcastingEntry?.prototype;
+  if (!spellcastingProto || typeof spellcastingProto.cast !== "function") return;
+
+  const originalCast = spellcastingProto.cast;
+  spellcastingProto.cast = async function spellCastLinkedBypass(spell, options = {}) {
+    if (!shouldApplyToolbeltSpellCastLinkedBypass()) {
+      return originalCast.call(this, spell, options);
+    }
+
+    const linkedFlagPath = `flags.${TOOLBELT_ID}.linked`;
+    const linkedMacroUuid = spell ? foundry.utils.getProperty(spell, linkedFlagPath) : null;
+    if (!linkedMacroUuid) {
+      return originalCast.call(this, spell, options);
+    }
+
+    const activeScope = getLastScopeFromStack();
+    const activeScopeSpellUuid = String(activeScope?.spell?.uuid ?? "");
+    const currentSpellUuid = String(spell?.uuid ?? "");
+    const sameSpellScopeCast = !!activeScopeSpellUuid && activeScopeSpellUuid === currentSpellUuid;
+    if (!sameSpellScopeCast) {
+      return originalCast.call(this, spell, options);
+    }
+
+    foundry.utils.setProperty(spell, linkedFlagPath, null);
+    try {
+      return await originalCast.call(this, spell, options);
+    } finally {
+      foundry.utils.setProperty(spell, linkedFlagPath, linkedMacroUuid);
+    }
+  };
+
+  spellCastLinkedMacroBypassPatched = true;
 }
 
 function formatEffectAppliedMessage(html) {
@@ -657,12 +702,21 @@ Hooks.once("init", () => {
     type: Boolean,
     default: true
   });
+  game.settings.register(MODULE_ID, "toolbeltSpellCastLinkedBypass", {
+    name: "Toolbelt Spell Cast Linked-Macro Bypass",
+    hint: "Optional compatibility patch: when a linked spell macro internally casts the same spell, bypass one recursive linked-macro pass to prevent duplicate dialogs.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: true
+  });
 });
 
 Hooks.once("ready", () => {
   installItemActivationsCreatePatch();
   refreshTargetHelperActionRowsFixStyle();
   installMacroExecuteScopeBridge();
+  installToolbeltSpellCastLinkedBypass();
 
   Hooks.on("createItem", async (item, _options, userId) => {
     try {

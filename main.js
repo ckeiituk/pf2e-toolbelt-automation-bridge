@@ -9,6 +9,11 @@ let chatScrollElement = null;
 let chatAtBottom = false;
 let actorCreateEmbeddedDocumentsPatched = false;
 
+const SAFE_SELF_EFFECT_UUID_PATTERNS = [
+  /^Compendium\.pf2e\.equipment-effects\.Item\.[A-Za-z0-9]+$/i,
+  /^Compendium\.pf2e-item-activations\.item-activations-effects\.Item\.[A-Za-z0-9]+$/i
+];
+
 const RUSSIAN_NUMBER_MAP = {
   "один": 1,
   "одна": 1,
@@ -259,11 +264,48 @@ function isItemActivationsGeneratedAction(item) {
   return item?.type === "action" && !!item?.flags?.[ITEM_ACTIVATIONS_ID]?.grantedBy;
 }
 
-function shouldApplyItemActivationsFix() {
+function shouldApplyItemActivationsRuFix() {
   return (
     game.settings.get(MODULE_ID, "itemActivationsRuFix") &&
     game.modules.get(ITEM_ACTIVATIONS_ID)?.active
   );
+}
+
+function shouldAutoLinkItemActivationSelfEffect() {
+  return (
+    game.settings.get(MODULE_ID, "itemActivationsAutoSelfEffect") &&
+    game.modules.get(ITEM_ACTIVATIONS_ID)?.active
+  );
+}
+
+function shouldApplyItemActivationsCreateSanitizer() {
+  return shouldApplyItemActivationsRuFix() || shouldAutoLinkItemActivationSelfEffect();
+}
+
+function isSafeSelfEffectUuid(uuid) {
+  return SAFE_SELF_EFFECT_UUID_PATTERNS.some((pattern) => pattern.test(uuid));
+}
+
+function findSafeSelfEffectCandidate(description) {
+  const source = String(description ?? "");
+  const regex = /@\s*UUID\[(Compendium\.[^\]]+)\](?:\{([^}]*)\})?/gi;
+  const uniqueCandidates = new Map();
+
+  let match = regex.exec(source);
+  while (match) {
+    const uuid = String(match[1] ?? "").trim();
+    const name = String(match[2] ?? "").trim();
+    if (isSafeSelfEffectUuid(uuid) && !uniqueCandidates.has(uuid)) {
+      uniqueCandidates.set(uuid, {
+        uuid,
+        name: name || null
+      });
+    }
+    match = regex.exec(source);
+  }
+
+  if (uniqueCandidates.size !== 1) return null;
+  return uniqueCandidates.values().next().value ?? null;
 }
 
 function sanitizeItemActivationItemData(rawItem) {
@@ -276,23 +318,37 @@ function sanitizeItemActivationItemData(rawItem) {
   item.system.actions ??= {};
 
   const description = item.system?.description?.value ?? "";
-  item.system.traits.value = sanitizeActionTraits(item.system?.traits?.value, description);
+  if (shouldApplyItemActivationsRuFix()) {
+    item.system.traits.value = sanitizeActionTraits(item.system?.traits?.value, description);
 
-  const parsedAction = parseActionTypeFromDescription(description);
-  if (parsedAction) {
-    item.system.actionType.value = parsedAction.type;
-    if (parsedAction.actions !== null) {
-      item.system.actions.value = parsedAction.actions;
+    const parsedAction = parseActionTypeFromDescription(description);
+    if (parsedAction) {
+      item.system.actionType.value = parsedAction.type;
+      if (parsedAction.actions !== null) {
+        item.system.actions.value = parsedAction.actions;
+      }
+      const image = getActionImage(parsedAction.type, parsedAction.actions);
+      if (image) item.img = image;
     }
-    const image = getActionImage(parsedAction.type, parsedAction.actions);
-    if (image) item.img = image;
+
+    const hasFrequency = !!item.system?.frequency?.per && item.system?.frequency?.max != null;
+    if (!hasFrequency) {
+      const parsedFrequency = parseFrequencyFromDescription(description);
+      if (parsedFrequency) {
+        item.system.frequency = parsedFrequency;
+      }
+    }
   }
 
-  const hasFrequency = !!item.system?.frequency?.per && item.system?.frequency?.max != null;
-  if (!hasFrequency) {
-    const parsedFrequency = parseFrequencyFromDescription(description);
-    if (parsedFrequency) {
-      item.system.frequency = parsedFrequency;
+  if (shouldAutoLinkItemActivationSelfEffect()) {
+    item.system.selfEffect ??= {};
+    const currentUuid = String(item.system?.selfEffect?.uuid ?? "").trim();
+    if (!currentUuid) {
+      const candidate = findSafeSelfEffectCandidate(description);
+      if (candidate) {
+        item.system.selfEffect.uuid = candidate.uuid;
+        item.system.selfEffect.name = candidate.name ?? "Activation Effect";
+      }
     }
   }
 
@@ -312,7 +368,7 @@ function installItemActivationsCreatePatch() {
   const originalCreateEmbeddedDocuments = actorProto.createEmbeddedDocuments;
   actorProto.createEmbeddedDocuments = async function createEmbeddedDocumentsPatched(embeddedName, data, operation) {
     let payload = data;
-    if (embeddedName === "Item" && shouldApplyItemActivationsFix()) {
+    if (embeddedName === "Item" && shouldApplyItemActivationsCreateSanitizer()) {
       payload = sanitizeItemActivationCreateData(data);
     }
     return originalCreateEmbeddedDocuments.call(this, embeddedName, payload, operation);
@@ -322,34 +378,47 @@ function installItemActivationsCreatePatch() {
 }
 
 async function applyItemActivationsRussianFix(item, userId) {
-  if (!shouldApplyItemActivationsFix()) return;
+  if (!shouldApplyItemActivationsCreateSanitizer()) return;
   if (!isItemActivationsGeneratedAction(item)) return;
   if (userId !== game.user.id) return;
 
   const description = item.system?.description?.value ?? "";
   const updates = {};
 
-  const parsedAction = parseActionTypeFromDescription(description);
-  if (parsedAction) {
-    const currentType = item.system?.actionType?.value ?? "passive";
-    const currentActions = item.system?.actions?.value ?? null;
-    if (currentType !== parsedAction.type) {
-      updates["system.actionType.value"] = parsedAction.type;
+  if (shouldApplyItemActivationsRuFix()) {
+    const parsedAction = parseActionTypeFromDescription(description);
+    if (parsedAction) {
+      const currentType = item.system?.actionType?.value ?? "passive";
+      const currentActions = item.system?.actions?.value ?? null;
+      if (currentType !== parsedAction.type) {
+        updates["system.actionType.value"] = parsedAction.type;
+      }
+      if (parsedAction.actions !== null && currentActions !== parsedAction.actions) {
+        updates["system.actions.value"] = parsedAction.actions;
+      }
+      const image = getActionImage(parsedAction.type, parsedAction.actions);
+      if (image && item.img !== image) {
+        updates.img = image;
+      }
     }
-    if (parsedAction.actions !== null && currentActions !== parsedAction.actions) {
-      updates["system.actions.value"] = parsedAction.actions;
-    }
-    const image = getActionImage(parsedAction.type, parsedAction.actions);
-    if (image && item.img !== image) {
-      updates.img = image;
+
+    const hasFrequency = !!item.system?.frequency?.per && item.system?.frequency?.max != null;
+    if (!hasFrequency) {
+      const parsedFrequency = parseFrequencyFromDescription(description);
+      if (parsedFrequency) {
+        updates["system.frequency"] = parsedFrequency;
+      }
     }
   }
 
-  const hasFrequency = !!item.system?.frequency?.per && item.system?.frequency?.max != null;
-  if (!hasFrequency) {
-    const parsedFrequency = parseFrequencyFromDescription(description);
-    if (parsedFrequency) {
-      updates["system.frequency"] = parsedFrequency;
+  if (shouldAutoLinkItemActivationSelfEffect()) {
+    const currentSelfEffect = String(item.system?.selfEffect?.uuid ?? "").trim();
+    if (!currentSelfEffect) {
+      const candidate = findSafeSelfEffectCandidate(description);
+      if (candidate) {
+        updates["system.selfEffect.uuid"] = candidate.uuid;
+        updates["system.selfEffect.name"] = candidate.name ?? "Activation Effect";
+      }
     }
   }
 
@@ -378,6 +447,14 @@ Hooks.once("init", () => {
   game.settings.register(MODULE_ID, "itemActivationsRuFix", {
     name: "PF2e Item Activations RU Fix",
     hint: "Optional compatibility patch: fix generated action type and frequency for Russian activation text.",
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false
+  });
+  game.settings.register(MODULE_ID, "itemActivationsAutoSelfEffect", {
+    name: "PF2e Item Activations Auto-Link Self Effect",
+    hint: "Optional compatibility patch: link selfEffect from description only when one safe effect UUID is found.",
     scope: "world",
     config: true,
     type: Boolean,

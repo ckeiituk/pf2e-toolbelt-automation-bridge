@@ -402,16 +402,17 @@ function installMacroExecuteScopeBridge() {
     const hasIncomingScopeArg = args.length > 0;
     const incomingScope = hasIncomingScopeArg ? args[0] : undefined;
     const incomingScopeHasData = hasScopeData(incomingScope);
+    const inheritedScope = bridgeEnabled ? getLastScopeFromStack() : null;
 
     let effectiveScope = incomingScope;
-    if (bridgeEnabled && !incomingScopeHasData) {
-      effectiveScope = getLastScopeFromStack() ?? {};
+    if (bridgeEnabled && !incomingScopeHasData && inheritedScope) {
+      effectiveScope = inheritedScope;
     }
 
     const trackedScope = hasScopeData(effectiveScope) ? effectiveScope : null;
     macroExecutionScopeStack.push(trackedScope);
     try {
-      if (!hasIncomingScopeArg && !bridgeEnabled) {
+      if (!hasIncomingScopeArg && !hasScopeData(effectiveScope)) {
         return originalExecute.apply(this, args);
       }
 

@@ -361,6 +361,29 @@ function refreshTargetHelperActionRowsFixStyle() {
   document.head.append(style);
 }
 
+function formatEffectAppliedMessage(html) {
+  const root = getHTMLElement(html);
+  if (!root) return;
+
+  const appliedNodes = root.querySelectorAll(".effect-applied");
+  for (const node of appliedNodes) {
+    const link = node.querySelector("a");
+    if (!(link instanceof HTMLElement)) continue;
+
+    const previousElement = link.previousElementSibling;
+    if (previousElement?.tagName === "BR") continue;
+
+    const previousNode = link.previousSibling;
+    if (previousNode?.nodeType === Node.TEXT_NODE) {
+      previousNode.textContent = String(previousNode.textContent ?? "").replace(/\s+$/u, "");
+    }
+
+    const br = document.createElement("br");
+    br.dataset.bridgeEffectAppliedBreak = "true";
+    node.insertBefore(br, link);
+  }
+}
+
 function isSafeSelfEffectUuid(uuid) {
   return SAFE_SELF_EFFECT_UUID_PATTERNS.some((pattern) => pattern.test(uuid));
 }
@@ -570,6 +593,10 @@ Hooks.once("ready", () => {
   attachChatScrollListener();
 
   Hooks.on("renderChatMessageHTML", (message, html) => {
+    if (shouldApplyTargetHelperActionRowsFix()) {
+      formatEffectAppliedMessage(html);
+    }
+
     attachChatScrollListener();
     if (!game.settings.get(MODULE_ID, "autoScrollTargets")) return;
     if (!chatAtBottom) return;

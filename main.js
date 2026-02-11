@@ -5,6 +5,7 @@ const ITEM_ACTIVATIONS_ID = "pf2e-item-activations";
 const SOCKET = `module.${MODULE_ID}`;
 const CHAT_BOTTOM_EPSILON = 8;
 const TOOLBELT_ACTION_ROWS_FIX_STYLE_ID = `${MODULE_ID}-toolbelt-action-rows-fix`;
+const FORCE_BARRAGE_TARGET_DIALOG_STYLE_ID = `${MODULE_ID}-force-barrage-target-dialog-style`;
 const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
   "flags.actionable.linked",
   `flags.${TOOLBELT_ID}.linked`
@@ -308,6 +309,10 @@ function shouldApplyTargetHelperActionRowsFix() {
   );
 }
 
+function shouldApplyForceBarrageTargetDialogBridge() {
+  return game.settings.get(MODULE_ID, "forceBarrageTargetDialogBridge");
+}
+
 function shouldApplyToolbeltMacroScopeBridge() {
   return (
     game.settings.get(MODULE_ID, "toolbeltMacroScopeBridge") &&
@@ -362,6 +367,193 @@ function refreshTargetHelperActionRowsFixStyle() {
   style.id = TOOLBELT_ACTION_ROWS_FIX_STYLE_ID;
   style.textContent = getTargetHelperActionRowsFixCss();
   document.head.append(style);
+}
+
+function getForceBarrageTargetDialogBridgeCss() {
+  return `
+    .dialog .window-content label.bridge-force-barrage-target-label-host {
+      cursor: pointer;
+    }
+
+    .dialog .window-content .bridge-force-barrage-target-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      max-width: 100%;
+      vertical-align: middle;
+      white-space: nowrap;
+    }
+
+    .dialog .window-content .bridge-force-barrage-target-icon {
+      width: 1.25rem;
+      height: 1.25rem;
+      object-fit: cover;
+      border: 1px solid var(--color-border-light-2);
+      border-radius: 3px;
+      flex: 0 0 auto;
+    }
+
+    .dialog .window-content .bridge-force-barrage-target-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+  `;
+}
+
+function refreshForceBarrageTargetDialogBridgeStyle() {
+  const currentStyle = document.getElementById(FORCE_BARRAGE_TARGET_DIALOG_STYLE_ID);
+  if (currentStyle) {
+    currentStyle.remove();
+  }
+
+  if (!shouldApplyForceBarrageTargetDialogBridge()) return;
+
+  const style = document.createElement("style");
+  style.id = FORCE_BARRAGE_TARGET_DIALOG_STYLE_ID;
+  style.textContent = getForceBarrageTargetDialogBridgeCss();
+  document.head.append(style);
+}
+
+function getCanvasTokenById(tokenId) {
+  const id = String(tokenId ?? "").trim();
+  if (!id) return null;
+  return canvas?.tokens?.get?.(id) ?? null;
+}
+
+function setDialogTokenHover(tokenId, hovered) {
+  const token = getCanvasTokenById(tokenId);
+  if (!token) return;
+
+  try {
+    if (hovered && typeof token._onHoverIn === "function") {
+      token._onHoverIn({ type: "mouseenter", bridge: MODULE_ID });
+      return;
+    }
+
+    if (!hovered && typeof token._onHoverOut === "function") {
+      token._onHoverOut({ type: "mouseleave", bridge: MODULE_ID });
+    }
+  } catch (_error) {
+    // best effort only
+  }
+}
+
+function focusDialogToken(tokenId) {
+  const token = getCanvasTokenById(tokenId);
+  const center = token?.center;
+  if (!center || typeof canvas?.animatePan !== "function") return;
+  canvas.animatePan({ x: center.x, y: center.y, duration: 150 });
+}
+
+function formatTokenGridPositionLabel(token) {
+  const tokenDoc = token?.document ?? token;
+  const gridSize = Number(canvas?.grid?.size ?? canvas?.scene?.grid?.size ?? 0);
+  const tokenX = Number(tokenDoc?.x);
+  const tokenY = Number(tokenDoc?.y);
+  if (!Number.isFinite(gridSize) || gridSize <= 0) return null;
+  if (!Number.isFinite(tokenX) || !Number.isFinite(tokenY)) return null;
+
+  const gridX = Math.floor(tokenX / gridSize) + 1;
+  const gridY = Math.floor(tokenY / gridSize) + 1;
+  return `x${gridX}, y${gridY}`;
+}
+
+function isLikelyForceBarrageTargetDialog(app, root) {
+  if (!(root instanceof HTMLElement)) return false;
+  const title = String(app?.title ?? "");
+  if (!/barrage|magic missile|шквал силы|снаряд/i.test(title)) return false;
+
+  const hasDistributionInputs = !!root.querySelector("input[type='number'][id$='qd']");
+  if (!hasDistributionInputs) return false;
+  return !!root.querySelector("table");
+}
+
+function enhanceForceBarrageTargetDialog(app, html) {
+  if (!shouldApplyForceBarrageTargetDialogBridge()) return;
+
+  const root = getHTMLElement(html);
+  if (!root) return;
+  if (root.dataset.bridgeForceBarrageDialogPatched === "true") return;
+  if (!isLikelyForceBarrageTargetDialog(app, root)) return;
+
+  const userTargets = Array.from(game.user?.targets ?? []);
+  if (userTargets.length === 0) return;
+
+  const targetRows = Array.from(root.querySelectorAll("table tr")).filter((row) =>
+    row.querySelector("input[type='number'][id$='qd']")
+  );
+  if (targetRows.length === 0) return;
+
+  root.dataset.bridgeForceBarrageDialogPatched = "true";
+
+  const totalByName = new Map();
+  for (const target of userTargets) {
+    const name = String(target?.name ?? target?.document?.name ?? "").trim();
+    if (!name) continue;
+    totalByName.set(name, (totalByName.get(name) ?? 0) + 1);
+  }
+  const indexByName = new Map();
+
+  for (let rowIndex = 0; rowIndex < targetRows.length; rowIndex += 1) {
+    const row = targetRows[rowIndex];
+    const label = row.querySelector("th label");
+    if (!(label instanceof HTMLElement)) continue;
+
+    const existingId = String(label.querySelector("img[id]")?.id ?? "").trim();
+    const target = existingId
+      ? getCanvasTokenById(existingId)
+      : userTargets[rowIndex] ?? null;
+    if (!target) continue;
+
+    const token = getCanvasTokenById(target.id) ?? target;
+    const tokenId = String(token?.id ?? target?.id ?? "").trim();
+    if (!tokenId) continue;
+
+    const baseName = String(token?.name ?? target?.name ?? target?.document?.name ?? `Target ${rowIndex + 1}`).trim();
+    const fallbackName = baseName || `Target ${rowIndex + 1}`;
+    const seen = (indexByName.get(fallbackName) ?? 0) + 1;
+    indexByName.set(fallbackName, seen);
+    const total = totalByName.get(fallbackName) ?? 1;
+    const numbered = total > 1 ? `${fallbackName} #${seen}` : fallbackName;
+    const gridPosition = formatTokenGridPositionLabel(token);
+    const displayName = gridPosition ? `${numbered} (${gridPosition})` : numbered;
+    const tokenImage = String(token?.document?.texture?.src ?? token?.texture?.src ?? "").trim();
+
+    const content = document.createElement("span");
+    content.className = "bridge-force-barrage-target-label";
+    content.dataset.tokenId = tokenId;
+
+    if (tokenImage) {
+      const icon = document.createElement("img");
+      icon.className = "bridge-force-barrage-target-icon";
+      icon.src = tokenImage;
+      icon.alt = displayName;
+      content.append(icon);
+    }
+
+    const text = document.createElement("span");
+    text.className = "bridge-force-barrage-target-name";
+    text.textContent = displayName;
+    content.append(text);
+
+    label.replaceChildren(content);
+    label.classList.add("bridge-force-barrage-target-label-host");
+    label.title = displayName;
+
+    if (label.dataset.bridgeTokenHoverBound !== "true") {
+      label.dataset.bridgeTokenHoverBound = "true";
+      label.addEventListener("mouseenter", () => {
+        setDialogTokenHover(tokenId, true);
+      });
+      label.addEventListener("mouseleave", () => {
+        setDialogTokenHover(tokenId, false);
+      });
+      label.addEventListener("click", (event) => {
+        event.preventDefault();
+        focusDialogToken(tokenId);
+      });
+    }
+  }
 }
 
 function isPlainObjectScope(value) {
@@ -983,6 +1175,17 @@ Hooks.once("init", () => {
       refreshTargetHelperActionRowsFixStyle();
     }
   });
+  game.settings.register(MODULE_ID, "forceBarrageTargetDialogBridge", {
+    name: "Force Barrage Target Dialog Enhancer",
+    hint: "Optional UI patch: in Force Barrage target distribution dialogs, show token portrait, duplicate-name numbering, and hover-highlight/click-focus helpers.",
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: true,
+    onChange: () => {
+      refreshForceBarrageTargetDialogBridgeStyle();
+    }
+  });
   game.settings.register(MODULE_ID, "toolbeltMacroScopeBridge", {
     name: "Toolbelt Nested Macro Scope Bridge",
     hint: "Optional compatibility patch: nested script macros inherit Toolbelt spell scope (cast/options), including async compendium-link wrappers, so linked casts keep slot/charge behavior.",
@@ -1004,9 +1207,18 @@ Hooks.once("init", () => {
 Hooks.once("ready", () => {
   installItemActivationsCreatePatch();
   refreshTargetHelperActionRowsFixStyle();
+  refreshForceBarrageTargetDialogBridgeStyle();
   installMacroExecuteScopeBridge();
   installToolbeltSpellCastLinkedBypass();
   scheduleToolbeltActionableGetItemMacroSuppressionPatch();
+
+  Hooks.on("renderDialog", (app, html) => {
+    try {
+      enhanceForceBarrageTargetDialog(app, html);
+    } catch (error) {
+      console.warn(`[${MODULE_ID}] Failed to enhance Force Barrage target dialog`, error);
+    }
+  });
 
   Hooks.on("createItem", async (item, _options, userId) => {
     try {

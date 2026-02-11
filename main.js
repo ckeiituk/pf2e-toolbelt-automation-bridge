@@ -10,7 +10,7 @@ const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
   `flags.${TOOLBELT_ID}.linked`
 ];
 const ASYNC_SCOPE_FALLBACK_TTL_MS = 12000;
-const TOOLBELT_LINKED_SUPPRESSION_TTL_MS = 120000;
+const TOOLBELT_LINKED_SUPPRESSION_TTL_MS = 86400000;
 const TOOLBELT_LINKED_SUPPRESSION_USES = 1;
 const TOOLBELT_ACTIONABLE_PATCH_RETRY_MS = 250;
 const TOOLBELT_ACTIONABLE_PATCH_MAX_RETRIES = 40;
@@ -468,7 +468,7 @@ function cleanupLinkedMacroSuppressions() {
   }
 }
 
-function registerLinkedMacroSuppressionForSpell(spell, uses = TOOLBELT_LINKED_SUPPRESSION_USES) {
+function registerLinkedMacroSuppressionForSpell(spell, uses = TOOLBELT_LINKED_SUPPRESSION_USES, scopeRef = null) {
   if (!spell || uses <= 0) return;
   cleanupLinkedMacroSuppressions();
   const expiresAt = Date.now() + TOOLBELT_LINKED_SUPPRESSION_TTL_MS;
@@ -479,24 +479,29 @@ function registerLinkedMacroSuppressionForSpell(spell, uses = TOOLBELT_LINKED_SU
     const mergedExpiry = Math.max(existing?.expiresAt ?? 0, expiresAt);
     toolbeltLinkedMacroSuppressions.set(key, {
       uses: mergedUses,
-      expiresAt: mergedExpiry
+      expiresAt: mergedExpiry,
+      scopeRef: scopeRef ?? existing?.scopeRef ?? null
     });
   }
 }
 
-function consumeLinkedMacroSuppressionForSpell(spell) {
+function consumeLinkedMacroSuppressionForSpell(spell, scopeRef = null) {
   cleanupLinkedMacroSuppressions();
   const keys = getSpellSuppressionKeys(spell);
   for (const key of keys) {
     const existing = toolbeltLinkedMacroSuppressions.get(key);
     if (!existing) continue;
+    if (existing.scopeRef && scopeRef && existing.scopeRef !== scopeRef) continue;
+    if (existing.scopeRef && !scopeRef) continue;
+
     const remaining = existing.uses - 1;
     if (remaining <= 0) {
       toolbeltLinkedMacroSuppressions.delete(key);
     } else {
       toolbeltLinkedMacroSuppressions.set(key, {
         uses: remaining,
-        expiresAt: existing.expiresAt
+        expiresAt: existing.expiresAt,
+        scopeRef: existing.scopeRef ?? null
       });
     }
     return true;
@@ -552,10 +557,11 @@ function installToolbeltActionableGetItemMacroSuppressionPatch() {
   if (canPatchPrototype) {
     const originalGetItemMacro = actionableProto.getItemMacro;
     actionableProto.getItemMacro = async function getItemMacroSuppressed(action) {
+      const suppressionScope = getToolbeltScopeForSuppression(action);
       if (
         shouldApplyToolbeltSpellCastLinkedBypass() &&
-        getToolbeltScopeForSuppression(action) &&
-        consumeLinkedMacroSuppressionForSpell(action)
+        suppressionScope &&
+        consumeLinkedMacroSuppressionForSpell(action, suppressionScope)
       ) {
         return null;
       }
@@ -568,10 +574,11 @@ function installToolbeltActionableGetItemMacroSuppressionPatch() {
 
   const originalGetItemMacro = actionableTool.getItemMacro.bind(actionableTool);
   actionableTool.getItemMacro = async function getItemMacroSuppressed(action) {
+    const suppressionScope = getToolbeltScopeForSuppression(action);
     if (
       shouldApplyToolbeltSpellCastLinkedBypass() &&
-      getToolbeltScopeForSuppression(action) &&
-      consumeLinkedMacroSuppressionForSpell(action)
+      suppressionScope &&
+      consumeLinkedMacroSuppressionForSpell(action, suppressionScope)
     ) {
       return null;
     }
@@ -677,7 +684,7 @@ function installMacroExecuteScopeBridge() {
     if (bridgeEnabled && trackedScope) {
       rememberMacroExecutionFallbackScope(trackedScope);
       if (shouldApplyToolbeltSpellCastLinkedBypass()) {
-        registerLinkedMacroSuppressionForSpell(trackedScope.spell);
+        registerLinkedMacroSuppressionForSpell(trackedScope.spell, TOOLBELT_LINKED_SUPPRESSION_USES, trackedScope);
       }
     }
 

@@ -28,6 +28,10 @@ const BANE_AURA_LABEL_PATTERNS = [
   /^Aura:\s*Bane$/i,
   /^Аура:\s*Проклятие$/i
 ];
+const BANE_AURA_EXPERIMENTAL_GROW_FEET = 5;
+const BANE_AURA_EFFECT_NAME_PREFIX = "pf2e x jb2a aura -";
+const BANE_AURA_NAME_HINTS = ["bane", "проклят"];
+const BANE_AURA_ORIGIN_HINTS = ["aura-bane"];
 
 let chatScrollElement = null;
 let chatAtBottom = false;
@@ -328,6 +332,13 @@ function shouldApplyBaneAuraVisualRefresh() {
   );
 }
 
+function shouldApplyBaneAuraVisualGrowBy5Experimental() {
+  return (
+    shouldApplyBaneAuraVisualRefresh() &&
+    game.settings.get(MODULE_ID, "baneAuraVisualGrowBy5Experimental")
+  );
+}
+
 function isBaneAuraEffect(item) {
   if (!item || item.type !== "effect") return false;
 
@@ -371,6 +382,127 @@ function getActorTokenForBaneAura(actor) {
   if (activeTokens[0]) return activeTokens[0];
 
   return canvas?.tokens?.placeables?.find((token) => token.actor?.id === actor.id) ?? null;
+}
+
+function getBaneAuraEffectCleanupIds(effectManager, token, effectItem, effectName) {
+  if (!effectManager || typeof effectManager.getEffects !== "function") return [];
+
+  let activeEffects = [];
+  try {
+    activeEffects = effectManager.getEffects({ object: token }) ?? [];
+  } catch (_error) {
+    activeEffects = [];
+  }
+  if (!Array.isArray(activeEffects) || activeEffects.length === 0) return [];
+
+  const itemUuid = String(effectItem?.uuid ?? "").trim();
+  const normalizedEffectName = String(effectName ?? "").trim().toLowerCase();
+
+  const cleanupIds = new Set();
+  for (const activeEffect of activeEffects) {
+    const effectId = String(activeEffect?.id ?? "").trim();
+    if (!effectId) continue;
+
+    const effectNameValue = String(activeEffect?.data?.name ?? activeEffect?.name ?? "").trim();
+    const effectOriginValue = String(activeEffect?.data?.origin ?? activeEffect?.origin ?? "").trim();
+    const normalizedNameValue = effectNameValue.toLowerCase();
+    const normalizedOriginValue = effectOriginValue.toLowerCase();
+
+    const matchesItemOrigin = !!itemUuid && effectOriginValue === itemUuid;
+    const matchesDefaultName = !!normalizedEffectName && normalizedNameValue === normalizedEffectName;
+    const matchesBaneAuraName =
+      normalizedNameValue.startsWith(BANE_AURA_EFFECT_NAME_PREFIX) &&
+      BANE_AURA_NAME_HINTS.some((hint) => normalizedNameValue.includes(hint));
+    const matchesBaneAuraOrigin = BANE_AURA_ORIGIN_HINTS.some((hint) =>
+      normalizedOriginValue.includes(hint)
+    );
+
+    if (matchesItemOrigin || matchesDefaultName || matchesBaneAuraName || matchesBaneAuraOrigin) {
+      cleanupIds.add(effectId);
+    }
+  }
+
+  return Array.from(cleanupIds);
+}
+
+function getBaneAuraSceneId(token) {
+  const tokenSceneId = String(token?.scene?.id ?? token?.document?.parent?.id ?? "").trim();
+  if (tokenSceneId) return tokenSceneId;
+  return String(canvas?.scene?.id ?? game.user.viewedScene ?? "").trim();
+}
+
+function getBaneAuraResizeDeltaGridUnits() {
+  const sceneDistance = Number(canvas?.scene?.grid?.distance ?? 5);
+  if (!Number.isFinite(sceneDistance) || sceneDistance <= 0) return 1;
+  return BANE_AURA_EXPERIMENTAL_GROW_FEET / sceneDistance;
+}
+
+async function tryResizeExistingBaneAura(effectManager, token, effectItem, effectName, badgeValue) {
+  if (!shouldApplyBaneAuraVisualGrowBy5Experimental()) return false;
+  if (!effectManager || typeof effectManager.getEffects !== "function") return false;
+  if (typeof effectManager.updateEffects !== "function") return false;
+
+  const cleanupIds = getBaneAuraEffectCleanupIds(effectManager, token, effectItem, effectName);
+  if (cleanupIds.length === 0) return false;
+
+  let activeEffects = [];
+  try {
+    activeEffects = effectManager.getEffects({ object: token }) ?? [];
+  } catch (_error) {
+    activeEffects = [];
+  }
+  if (!Array.isArray(activeEffects) || activeEffects.length === 0) return false;
+
+  const matchingEffects = activeEffects.filter((activeEffect) => {
+    const effectId = String(activeEffect?.id ?? "").trim();
+    return !!effectId && cleanupIds.includes(effectId);
+  });
+  if (matchingEffects.length === 0) return false;
+
+  const primaryEffect = matchingEffects[matchingEffects.length - 1];
+  const primaryId = String(primaryEffect?.id ?? "").trim();
+  if (!primaryId) return false;
+
+  const width = Number(primaryEffect?.data?.size?.width);
+  const height = Number(primaryEffect?.data?.size?.height);
+  if (!Number.isFinite(width) || width <= 0) return false;
+  if (!Number.isFinite(height) || height <= 0) return false;
+
+  const deltaGridUnits = getBaneAuraResizeDeltaGridUnits();
+  if (!Number.isFinite(deltaGridUnits) || deltaGridUnits <= 0) return false;
+
+  const sceneId = getBaneAuraSceneId(token);
+  const staleIds = matchingEffects
+    .map((activeEffect) => String(activeEffect?.id ?? "").trim())
+    .filter((effectId) => !!effectId && effectId !== primaryId);
+
+  if (staleIds.length > 0 && effectManager.endEffects) {
+    await Promise.resolve(effectManager.endEffects({ effects: staleIds, sceneId }));
+  }
+
+  await Promise.resolve(
+    effectManager.updateEffects(
+      { effects: [primaryId], sceneId },
+      {
+        size: {
+          width: width + deltaGridUnits,
+          height: height + deltaGridUnits,
+          gridUnits: true
+        }
+      }
+    )
+  );
+
+  bridgeDebug("Bane aura visual resized in place (+5ft experimental)", {
+    actor: String(effectItem?.actor?.name ?? effectItem?.actor?.id ?? ""),
+    token: String(token?.name ?? token?.id ?? ""),
+    item: String(effectItem?.name ?? effectItem?.id ?? ""),
+    badge: badgeValue,
+    staleCleared: staleIds.length,
+    resizedId: primaryId,
+    deltaFeet: BANE_AURA_EXPERIMENTAL_GROW_FEET
+  });
+  return true;
 }
 
 function scheduleBaneAuraVisualRefresh(effectItem, badgeValue) {
@@ -420,11 +552,37 @@ async function refreshBaneAuraVisual(itemUuid, badgeValue) {
   const effectManager = globalThis.Sequencer?.EffectManager;
   const itemName = String(effectItem.name ?? "").replace(/[^A-Za-z0-9 .*_-]/g, "");
   const effectName = `${itemName}${token.id}`;
+  const sceneId = getBaneAuraSceneId(token);
 
   try {
+    const resizedInPlace = await tryResizeExistingBaneAura(
+      effectManager,
+      token,
+      effectItem,
+      effectName,
+      badgeValue
+    );
+    if (resizedInPlace) return;
+
     if (effectManager?.endEffects) {
       await Promise.resolve(effectManager.endEffects({ object: token, name: effectName }));
       await Promise.resolve(effectManager.endEffects({ object: token, origin: effectItem.uuid }));
+
+      const cleanupIds = getBaneAuraEffectCleanupIds(effectManager, token, effectItem, effectName);
+      if (cleanupIds.length > 0) {
+        bridgeDebug("clear stale Bane aura overlays", {
+          actor: String(actor?.name ?? actor?.id ?? ""),
+          token: String(token?.name ?? token?.id ?? ""),
+          count: cleanupIds.length
+        });
+
+        await Promise.resolve(
+          effectManager.endEffects({
+            effects: cleanupIds,
+            sceneId
+          })
+        );
+      }
     }
 
     await aaApi.playAnimation(token, effectItem, {

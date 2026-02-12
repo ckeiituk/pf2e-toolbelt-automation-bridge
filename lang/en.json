@@ -41,6 +41,10 @@
         "name": "Bane Aura Visual Auto-Refresh",
         "hint": "Optional compatibility patch: when Bane aura badge changes, debounce-restart its Active Effect animation so visual radius follows mechanical badge/radius updates."
       },
+      "baneAuraVisualGrowBy5Experimental": {
+        "name": "Bane Aura In-Place +5ft (Experimental)",
+        "hint": "Optional compatibility patch (experimental): on Bane badge updates, try resizing existing Sequencer aura by +5 ft in place (clears duplicate overlays); if it fails, fall back to full restart. Requires Bane Aura Visual Auto-Refresh."
+      },
       "toolbeltMacroScopeBridge": {
         "name": "Toolbelt Nested Macro Scope Bridge",
         "hint": "Optional compatibility patch: nested script macros inherit Toolbelt spell scope (cast/options), including async compendium-link wrappers, so linked casts keep slot/charge behavior."

@@ -91,6 +91,14 @@ export function registerBridgeSettings({
     type: Boolean,
     default: false
   });
+  game.settings.register(moduleId, "baneAuraVisualGrowBy5Experimental", {
+    name: localizeSetting("baneAuraVisualGrowBy5Experimental.name"),
+    hint: localizeSetting("baneAuraVisualGrowBy5Experimental.hint"),
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false
+  });
   game.settings.register(moduleId, "toolbeltMacroScopeBridge", {
     name: localizeSetting("toolbeltMacroScopeBridge.name"),
     hint: localizeSetting("toolbeltMacroScopeBridge.hint"),

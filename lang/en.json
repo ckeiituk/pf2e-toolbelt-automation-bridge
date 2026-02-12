@@ -37,6 +37,10 @@
           "aggressive": "Aggressive (Broader)"
         }
       },
+      "baneAuraVisualRefresh": {
+        "name": "Bane Aura Visual Auto-Refresh",
+        "hint": "Optional compatibility patch: when Bane aura badge changes, debounce-restart its Active Effect animation so visual radius follows mechanical badge/radius updates."
+      },
       "toolbeltMacroScopeBridge": {
         "name": "Toolbelt Nested Macro Scope Bridge",
         "hint": "Optional compatibility patch: nested script macros inherit Toolbelt spell scope (cast/options), including async compendium-link wrappers, so linked casts keep slot/charge behavior."

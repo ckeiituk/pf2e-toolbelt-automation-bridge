@@ -37,6 +37,10 @@
           "aggressive": "Aggressive (шире)"
         }
       },
+      "baneAuraVisualRefresh": {
+        "name": "Авто-обновление визуала ауры Bane",
+        "hint": "Опциональный патч совместимости: при изменении зарядов (badge) ауры Bane с debounce перезапускает ее Active Effect-анимацию, чтобы визуальный радиус догонял механический."
+      },
       "toolbeltMacroScopeBridge": {
         "name": "Toolbelt bridge для scope вложенных макросов",
         "hint": "Опциональный патч совместимости: вложенные script-макросы наследуют scope заклинания Toolbelt (cast/options), включая асинхронные обертки compendium-link, чтобы linked-cast корректно тратил слоты/заряды."

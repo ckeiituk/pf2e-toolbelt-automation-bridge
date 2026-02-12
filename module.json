@@ -1,7 +1,7 @@
 {
   "id": "pf2e-toolbelt-automation-bridge",
   "title": "PF2e Toolbelt Automation Bridge",
-  "version": "0.1.30",
+  "version": "0.1.31",
   "esmodules": [
     "main.js"
   ],
@@ -35,5 +35,5 @@
   },
   "url": "https://github.com/ckeiituk/pf2e-toolbelt-automation-bridge",
   "manifest": "https://raw.githubusercontent.com/ckeiituk/pf2e-toolbelt-automation-bridge/main/module.json",
-  "download": "https://github.com/ckeiituk/pf2e-toolbelt-automation-bridge/releases/download/0.1.30/module.zip"
+  "download": "https://github.com/ckeiituk/pf2e-toolbelt-automation-bridge/releases/download/0.1.31/module.zip"
 }

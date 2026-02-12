@@ -5,8 +5,11 @@ const MODULE_ID = "pf2e-toolbelt-automation-bridge";
 const TOOLBELT_ID = "pf2e-toolbelt";
 const AUTOMATION_ID = "patreon-v3";
 const ITEM_ACTIVATIONS_ID = "pf2e-item-activations";
+const AUTOANIMATIONS_ID = "autoanimations";
+const PF2E_JB2A_MACROS_ID = "pf2e-jb2a-macros";
 const SOCKET = `module.${MODULE_ID}`;
 const CHAT_BOTTOM_EPSILON = 8;
+const BANE_AURA_REFRESH_DEBOUNCE_MS = 200;
 const TOOLBELT_ACTION_ROWS_FIX_STYLE_ID = `${MODULE_ID}-toolbelt-action-rows-fix`;
 const FORCE_BARRAGE_TARGET_DIALOG_STYLE_ID = `${MODULE_ID}-force-barrage-target-dialog-style`;
 const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
@@ -14,11 +17,23 @@ const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
   `flags.${TOOLBELT_ID}.linked`
 ];
 const COMPAT_WARNING_PREFIX = `[${MODULE_ID}] Compatibility warning`;
+const BANE_AURA_SOURCE_IDS = new Set([
+  "Compendium.patreon-v3.effects.Item.FcUe8TT7bhqlURIf"
+]);
+const BANE_AURA_SLUGS = new Set([
+  "aura-bane",
+  "aura-effect-bane"
+]);
+const BANE_AURA_LABEL_PATTERNS = [
+  /^Aura:\s*Bane$/i,
+  /^Аура:\s*Проклятие$/i
+];
 
 let chatScrollElement = null;
 let chatAtBottom = false;
 let actorCreateEmbeddedDocumentsPatched = false;
 const compatibilityWarningCodes = new Set();
+const baneAuraRefreshTimers = new Map();
 
 const SAFE_SELF_EFFECT_UUID_PATTERNS = [
   /^Compendium\.pf2e\.equipment-effects\.Item\.[A-Za-z0-9]+$/i,
@@ -302,6 +317,131 @@ function shouldApplyTargetHelperActionRowsFix() {
 
 function shouldApplyForceBarrageTargetDialogBridge() {
   return game.settings.get(MODULE_ID, "forceBarrageTargetDialogBridge");
+}
+
+function shouldApplyBaneAuraVisualRefresh() {
+  return (
+    game.settings.get(MODULE_ID, "baneAuraVisualRefresh") &&
+    game.modules.get(AUTOANIMATIONS_ID)?.active &&
+    game.modules.get(PF2E_JB2A_MACROS_ID)?.active &&
+    game.modules.get("sequencer")?.active
+  );
+}
+
+function isBaneAuraEffect(item) {
+  if (!item || item.type !== "effect") return false;
+
+  const sourceId = String(item.sourceId ?? "").trim();
+  if (sourceId && BANE_AURA_SOURCE_IDS.has(sourceId)) return true;
+
+  const slug = String(item.slug ?? item.system?.slug ?? "").trim().toLowerCase();
+  if (slug && BANE_AURA_SLUGS.has(slug)) return true;
+
+  const name = String(item.name ?? "").trim();
+  return BANE_AURA_LABEL_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+function hasBaneBadgeValueUpdate(change) {
+  if (!change || typeof change !== "object") return false;
+  if (Object.prototype.hasOwnProperty.call(change, "system.badge.value")) return true;
+  return foundry.utils.hasProperty(change, "system.badge.value");
+}
+
+function getBaneBadgeValue(item, change) {
+  let value = null;
+  if (Object.prototype.hasOwnProperty.call(change, "system.badge.value")) {
+    value = change["system.badge.value"];
+  } else {
+    value = foundry.utils.getProperty(change, "system.badge.value");
+  }
+  if (value == null) {
+    value = item?.system?.badge?.value;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function getActorTokenForBaneAura(actor) {
+  if (!actor) return null;
+
+  const actorToken = actor?.token?.object;
+  if (actorToken) return actorToken;
+
+  const activeTokens = actor.getActiveTokens?.() ?? [];
+  if (activeTokens[0]) return activeTokens[0];
+
+  return canvas?.tokens?.placeables?.find((token) => token.actor?.id === actor.id) ?? null;
+}
+
+function scheduleBaneAuraVisualRefresh(effectItem, badgeValue) {
+  const actorKey = String(effectItem?.actor?.uuid ?? effectItem?.actor?.id ?? "").trim();
+  const itemUuid = String(effectItem?.uuid ?? "").trim();
+  if (!actorKey || !itemUuid) return;
+
+  const existingTimer = baneAuraRefreshTimers.get(actorKey);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  const timerId = setTimeout(() => {
+    baneAuraRefreshTimers.delete(actorKey);
+    void refreshBaneAuraVisual(itemUuid, badgeValue);
+  }, BANE_AURA_REFRESH_DEBOUNCE_MS);
+
+  baneAuraRefreshTimers.set(actorKey, timerId);
+}
+
+async function refreshBaneAuraVisual(itemUuid, badgeValue) {
+  if (!shouldApplyBaneAuraVisualRefresh()) return;
+
+  let effectItem = null;
+  try {
+    effectItem = await fromUuid(itemUuid);
+  } catch (_error) {
+    effectItem = null;
+  }
+  if (!effectItem || !isBaneAuraEffect(effectItem)) return;
+
+  const actor = effectItem.actor;
+  const token = getActorTokenForBaneAura(actor);
+  if (!token) {
+    bridgeDebug("skip Bane aura visual refresh: no active token", {
+      actor: String(actor?.name ?? actor?.id ?? ""),
+      item: String(effectItem?.name ?? effectItem?.id ?? ""),
+      badge: badgeValue
+    });
+    return;
+  }
+
+  const aaApi = globalThis.AutomatedAnimations;
+  if (!aaApi || typeof aaApi.playAnimation !== "function") {
+    bridgeDebug("skip Bane aura visual refresh: AutomatedAnimations API missing");
+    return;
+  }
+
+  const effectManager = globalThis.Sequencer?.EffectManager;
+  const itemName = String(effectItem.name ?? "").replace(/[^A-Za-z0-9 .*_-]/g, "");
+  const effectName = `${itemName}${token.id}`;
+
+  try {
+    if (effectManager?.endEffects) {
+      await Promise.resolve(effectManager.endEffects({ object: token, name: effectName }));
+      await Promise.resolve(effectManager.endEffects({ object: token, origin: effectItem.uuid }));
+    }
+
+    await aaApi.playAnimation(token, effectItem, {
+      activeEffect: true,
+      tieToDocuments: true,
+      targets: []
+    });
+
+    bridgeDebug("Bane aura visual refreshed", {
+      actor: String(actor?.name ?? actor?.id ?? ""),
+      token: String(token?.name ?? token?.id ?? ""),
+      item: String(effectItem?.name ?? effectItem?.id ?? ""),
+      badge: badgeValue
+    });
+  } catch (error) {
+    console.warn(`[${MODULE_ID}] Failed to refresh Bane aura visual`, error);
+  }
 }
 
 function getForceBarrageDialogMatchMode() {
@@ -1013,6 +1153,25 @@ Hooks.once("ready", () => {
       await applyItemActivationsRussianFix(item, userId);
     } catch (error) {
       console.warn(`[${MODULE_ID}] Failed to apply Item Activations RU fix`, error);
+    }
+  });
+
+  Hooks.on("updateItem", (item, change, _options, userId) => {
+    try {
+      if (!shouldApplyBaneAuraVisualRefresh()) return;
+      if (game.user.id !== userId) return;
+      if (!isBaneAuraEffect(item)) return;
+      if (!hasBaneBadgeValueUpdate(change)) return;
+
+      const badgeValue = getBaneBadgeValue(item, change);
+      bridgeDebug("queue Bane aura visual refresh", {
+        actor: String(item?.actor?.name ?? item?.actor?.id ?? ""),
+        item: String(item?.name ?? item?.id ?? ""),
+        badge: badgeValue
+      });
+      scheduleBaneAuraVisualRefresh(item, badgeValue);
+    } catch (error) {
+      console.warn(`[${MODULE_ID}] Failed to queue Bane aura visual refresh`, error);
     }
   });
 

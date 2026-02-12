@@ -83,6 +83,14 @@ export function registerBridgeSettings({
     },
     default: "safe"
   });
+  game.settings.register(moduleId, "baneAuraVisualRefresh", {
+    name: localizeSetting("baneAuraVisualRefresh.name"),
+    hint: localizeSetting("baneAuraVisualRefresh.hint"),
+    scope: "world",
+    config: true,
+    type: Boolean,
+    default: false
+  });
   game.settings.register(moduleId, "toolbeltMacroScopeBridge", {
     name: localizeSetting("toolbeltMacroScopeBridge.name"),
     hint: localizeSetting("toolbeltMacroScopeBridge.hint"),

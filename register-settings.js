@@ -58,6 +58,14 @@ export function registerBridgeSettings({
       }
     }
   });
+  game.settings.register(moduleId, "targetHelperAttackBatchRoll", {
+    name: localizeSetting("targetHelperAttackBatchRoll.name"),
+    hint: localizeSetting("targetHelperAttackBatchRoll.hint"),
+    scope: "client",
+    config: true,
+    type: Boolean,
+    default: true
+  });
   game.settings.register(moduleId, "forceBarrageTargetDialogBridge", {
     name: localizeSetting("forceBarrageTargetDialogBridge.name"),
     hint: localizeSetting("forceBarrageTargetDialogBridge.hint"),

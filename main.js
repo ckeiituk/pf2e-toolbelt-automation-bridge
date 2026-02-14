@@ -12,10 +12,19 @@ const CHAT_BOTTOM_EPSILON = 8;
 const BANE_AURA_REFRESH_DEBOUNCE_MS = 200;
 const TOOLBELT_ACTION_ROWS_FIX_STYLE_ID = `${MODULE_ID}-toolbelt-action-rows-fix`;
 const FORCE_BARRAGE_TARGET_DIALOG_STYLE_ID = `${MODULE_ID}-force-barrage-target-dialog-style`;
+const TARGET_HELPER_ATTACK_BATCH_BUTTON_CLASS = "bridge-target-helper-roll-attacks";
+const TARGET_HELPER_ATTACK_BATCH_BUTTON_SELECTOR = `.${TARGET_HELPER_ATTACK_BATCH_BUTTON_CLASS}`;
+const TARGET_HELPER_ATTACK_BATCH_BUTTON_BUSY_KEY = "bridgeAttackBatchBusy";
+const TARGET_HELPER_ATTACK_BATCH_DELAY_MS = 90;
 const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
   "flags.actionable.linked",
   `flags.${TOOLBELT_ID}.linked`
 ];
+const TARGET_HELPER_SAVE_STATISTICS = new Set([
+  "fortitude",
+  "reflex",
+  "will"
+]);
 const COMPAT_WARNING_PREFIX = `[${MODULE_ID}] Compatibility warning`;
 const BANE_AURA_SOURCE_IDS = new Set([
   "Compendium.patreon-v3.effects.Item.FcUe8TT7bhqlURIf"
@@ -315,6 +324,13 @@ function shouldApplyItemActivationsCreateSanitizer() {
 function shouldApplyTargetHelperActionRowsFix() {
   return (
     game.settings.get(MODULE_ID, "targetHelperActionRowsFix") &&
+    game.modules.get(TOOLBELT_ID)?.active
+  );
+}
+
+function shouldApplyTargetHelperAttackBatchRoll() {
+  return (
+    game.settings.get(MODULE_ID, "targetHelperAttackBatchRoll") &&
     game.modules.get(TOOLBELT_ID)?.active
   );
 }
@@ -1099,6 +1115,279 @@ function installBridgeModuleApi() {
   };
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function getToolbeltMessageTargetUuids(message) {
+  if (!message) return [];
+
+  let targetUuids = [];
+  if (typeof message.getFlag === "function") {
+    const directValue = message.getFlag(TOOLBELT_ID, "targets");
+    if (Array.isArray(directValue)) {
+      targetUuids = directValue;
+    }
+  }
+
+  if (!Array.isArray(targetUuids) || targetUuids.length === 0) {
+    const fallbackValue = foundry.utils.getProperty(message, `flags.${TOOLBELT_ID}.targets`);
+    if (Array.isArray(fallbackValue)) {
+      targetUuids = fallbackValue;
+    }
+  }
+
+  return targetUuids.map((uuid) => String(uuid ?? "").trim()).filter(Boolean);
+}
+
+function getUserTargetIds() {
+  return Array.from(game.user?.targets ?? [])
+    .map((target) => String(target?.id ?? target?.document?.id ?? "").trim())
+    .filter(Boolean);
+}
+
+function updateUserTargetIds(tokenIds) {
+  const user = game.user;
+  if (!user) return;
+
+  const normalizedIds = Array.from(
+    new Set((tokenIds ?? []).map((id) => String(id ?? "").trim()).filter(Boolean))
+  );
+
+  if (typeof user.updateTokenTargets === "function") {
+    user.updateTokenTargets(normalizedIds);
+    return;
+  }
+
+  const idSet = new Set(normalizedIds);
+  for (const token of canvas?.tokens?.placeables ?? []) {
+    token.setTarget(idSet.has(token.id), {
+      releaseOthers: false,
+      groupSelection: true,
+      user
+    });
+  }
+}
+
+async function resolveTokenDocumentFromUuid(uuid) {
+  if (!uuid) return null;
+
+  let resolved = null;
+  if (typeof fromUuidSync === "function") {
+    try {
+      resolved = fromUuidSync(uuid);
+    } catch (_error) {
+      resolved = null;
+    }
+  }
+
+  if (!resolved && typeof fromUuid === "function") {
+    try {
+      resolved = await fromUuid(uuid);
+    } catch (_error) {
+      resolved = null;
+    }
+  }
+
+  if (resolved?.documentName === "Token") {
+    return resolved;
+  }
+
+  if (resolved?.document?.documentName === "Token") {
+    return resolved.document;
+  }
+
+  return null;
+}
+
+async function resolveTargetHelperAttackTargets(message) {
+  const resolvedTargets = [];
+  const usedTokenIds = new Set();
+  const targetUuids = getToolbeltMessageTargetUuids(message);
+
+  for (const uuid of targetUuids) {
+    const token = await resolveTokenDocumentFromUuid(uuid);
+    const tokenId = String(token?.id ?? "").trim();
+    if (!token || !tokenId || usedTokenIds.has(tokenId)) continue;
+    usedTokenIds.add(tokenId);
+    resolvedTargets.push(token);
+  }
+
+  if (resolvedTargets.length > 0) return resolvedTargets;
+
+  for (const activeTarget of game.user?.targets ?? []) {
+    const token = activeTarget?.document ?? activeTarget;
+    const tokenId = String(token?.id ?? "").trim();
+    if (!token || !tokenId || usedTokenIds.has(tokenId)) continue;
+    usedTokenIds.add(tokenId);
+    resolvedTargets.push(token);
+  }
+
+  return resolvedTargets;
+}
+
+function getTargetHelperCheckLink(root) {
+  if (!(root instanceof HTMLElement)) return null;
+
+  const messageContent = root.querySelector(".message-content");
+  if (!(messageContent instanceof HTMLElement)) return null;
+
+  const link =
+    messageContent.querySelector(":scope > a.inline-check.hidden") ||
+    messageContent.querySelector(":scope > a.inline-check") ||
+    messageContent.querySelector("a.inline-check.hidden");
+
+  return link instanceof HTMLAnchorElement ? link : null;
+}
+
+function hasAttackRollContext(message) {
+  if (!message) return false;
+
+  const contextType = String(foundry.utils.getProperty(message, "flags.pf2e.context.type") ?? "")
+    .trim()
+    .toLowerCase();
+  if (contextType.includes("attack")) return true;
+
+  const domains = foundry.utils.getProperty(message, "flags.pf2e.context.domains");
+  if (Array.isArray(domains)) {
+    const hasAttackDomain = domains.some((domain) =>
+      String(domain ?? "").toLowerCase().includes("attack")
+    );
+    if (hasAttackDomain) return true;
+  }
+
+  return false;
+}
+
+function isAttackRollCheckLink(checkLink) {
+  if (!(checkLink instanceof HTMLAnchorElement)) return false;
+
+  const checkType = String(checkLink.dataset.pf2Check ?? "").trim().toLowerCase();
+  if (!checkType) return false;
+  return !TARGET_HELPER_SAVE_STATISTICS.has(checkType);
+}
+
+function shouldAddTargetHelperAttackBatchButton(message, root, checkLink) {
+  if (!(root instanceof HTMLElement) || !(checkLink instanceof HTMLAnchorElement)) return false;
+  if (hasAttackRollContext(message)) return true;
+  return isAttackRollCheckLink(checkLink);
+}
+
+function createTargetHelperAttackBatchButton() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = TARGET_HELPER_ATTACK_BATCH_BUTTON_CLASS;
+  button.dataset.action = "bridge-roll-attacks";
+  button.innerHTML = "<i class='fa-solid fa-crosshairs'></i>";
+
+  const title = game.i18n.localize(`${MODULE_ID}.targetHelper.rollAttacks`);
+  button.title = title;
+  button.ariaLabel = title;
+  return button;
+}
+
+function dispatchTargetHelperCheckRoll(checkLink, sourceEvent, forceFastMode = false) {
+  if (!(checkLink instanceof HTMLAnchorElement)) return;
+
+  const clickEvent = new MouseEvent("click", {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    altKey: !!sourceEvent?.altKey,
+    ctrlKey: !!sourceEvent?.ctrlKey,
+    metaKey: !!sourceEvent?.metaKey,
+    shiftKey: forceFastMode || !!sourceEvent?.shiftKey
+  });
+
+  checkLink.dispatchEvent(clickEvent);
+}
+
+async function runTargetHelperAttackBatchRoll(message, root, sourceEvent) {
+  const checkLink = getTargetHelperCheckLink(root);
+  if (!checkLink) return;
+
+  const targets = await resolveTargetHelperAttackTargets(message);
+  if (targets.length === 0) {
+    ui.notifications?.warn?.(game.i18n.localize(`${MODULE_ID}.targetHelper.rollAttacksNoTargets`));
+    return;
+  }
+
+  const previousTargetIds = getUserTargetIds();
+  const forceFastMode = targets.length > 1;
+
+  bridgeDebug("Target Helper attack batch roll start", {
+    messageId: String(message?.id ?? ""),
+    targetCount: targets.length
+  });
+
+  try {
+    for (const target of targets) {
+      const targetId = String(target?.id ?? "").trim();
+      if (!targetId) continue;
+
+      updateUserTargetIds([targetId]);
+      await sleep(25);
+      dispatchTargetHelperCheckRoll(checkLink, sourceEvent, forceFastMode);
+      await sleep(TARGET_HELPER_ATTACK_BATCH_DELAY_MS);
+    }
+  } finally {
+    updateUserTargetIds(previousTargetIds);
+  }
+}
+
+function enhanceTargetHelperAttackBatchRoll(message, html) {
+  if (!shouldApplyTargetHelperAttackBatchRoll()) return;
+
+  const root = getHTMLElement(html);
+  if (!root) return;
+
+  const checkCard = root.querySelector(".pf2e-toolbelt-target-check");
+  if (!(checkCard instanceof HTMLElement)) return;
+
+  const targetRows = root.querySelector(".pf2e-toolbelt-target-targetRows");
+  if (!(targetRows instanceof HTMLElement)) return;
+
+  const buttonsWrapper = checkCard.querySelector(".pf2e-toolbelt-target-buttons");
+  if (!(buttonsWrapper instanceof HTMLElement)) return;
+  if (buttonsWrapper.querySelector(TARGET_HELPER_ATTACK_BATCH_BUTTON_SELECTOR)) return;
+
+  const checkLink = getTargetHelperCheckLink(root);
+  if (!checkLink) return;
+  if (!shouldAddTargetHelperAttackBatchButton(message, root, checkLink)) return;
+
+  const messageTargets = getToolbeltMessageTargetUuids(message);
+  if (messageTargets.length < 2 && (game.user?.targets?.size ?? 0) < 2) return;
+
+  const button = createTargetHelperAttackBatchButton();
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (button.dataset[TARGET_HELPER_ATTACK_BATCH_BUTTON_BUSY_KEY] === "true") return;
+
+    button.dataset[TARGET_HELPER_ATTACK_BATCH_BUTTON_BUSY_KEY] = "true";
+    button.disabled = true;
+
+    try {
+      await runTargetHelperAttackBatchRoll(message, root, event);
+    } catch (error) {
+      console.warn(`[${MODULE_ID}] Failed Target Helper attack batch roll`, error);
+    } finally {
+      button.disabled = false;
+      delete button.dataset[TARGET_HELPER_ATTACK_BATCH_BUTTON_BUSY_KEY];
+    }
+  });
+
+  const rollSavesButton = buttonsWrapper.querySelector(".pf2e-toolbelt-target-rollSaves");
+  if (rollSavesButton?.nextSibling) {
+    buttonsWrapper.insertBefore(button, rollSavesButton.nextSibling);
+  } else {
+    buttonsWrapper.append(button);
+  }
+}
+
 function formatEffectAppliedMessage(html) {
   const root = getHTMLElement(html);
   if (!root) return;
@@ -1341,6 +1630,9 @@ Hooks.once("ready", () => {
   Hooks.on("renderChatMessageHTML", (message, html) => {
     if (shouldApplyTargetHelperActionRowsFix()) {
       formatEffectAppliedMessage(html);
+    }
+    if (shouldApplyTargetHelperAttackBatchRoll()) {
+      enhanceTargetHelperAttackBatchRoll(message, html);
     }
 
     attachChatScrollListener();

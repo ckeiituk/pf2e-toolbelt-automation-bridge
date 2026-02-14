@@ -25,6 +25,10 @@
         "name": "Applied Label Layout Fix",
         "hint": "Optional compatibility patch: keep Applied/effect-applied labels readable instead of vertical text."
       },
+      "targetHelperAttackBatchRoll": {
+        "name": "Target Helper Batch Attack Roll",
+        "hint": "Optional bridge feature: add a Target Helper button to roll attack checks for each target in order."
+      },
       "forceBarrageTargetDialogBridge": {
         "name": "Macro Target Dialog Enhancer",
         "hint": "Optional UI patch: in macro target distribution dialogs, show token portrait, duplicate-name numbering, and hover-highlight/click-focus helpers."
@@ -53,6 +57,10 @@
         "name": "Toolbelt Spell Cast Linked-Macro Bypass",
         "hint": "Optional compatibility patch: when a linked spell macro internally casts, bypass one recursive linked-macro pass and suppress one actionable linked lookup to prevent duplicate dialogs and preserve slot/charge consumption."
       }
+    },
+    "targetHelper": {
+      "rollAttacks": "Roll Attacks",
+      "rollAttacksNoTargets": "No targets were found for this message."
     }
   }
 }

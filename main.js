@@ -16,6 +16,7 @@ const TARGET_HELPER_ATTACK_BATCH_BUTTON_CLASS = "bridge-target-helper-roll-attac
 const TARGET_HELPER_ATTACK_BATCH_BUTTON_SELECTOR = `.${TARGET_HELPER_ATTACK_BATCH_BUTTON_CLASS}`;
 const TARGET_HELPER_ATTACK_BATCH_BUTTON_BUSY_KEY = "bridgeAttackBatchBusy";
 const TARGET_HELPER_ATTACK_BATCH_DELAY_MS = 90;
+const TARGET_HELPER_TARGETING_SETTLE_MS = 25;
 const TOOLBELT_LINKED_MACRO_FLAG_PATHS = [
   "flags.actionable.linked",
   `flags.${TOOLBELT_ID}.linked`
@@ -38,9 +39,6 @@ const BANE_AURA_LABEL_PATTERNS = [
   /^Аура:\s*Проклятие$/i
 ];
 const BANE_AURA_EXPERIMENTAL_GROW_FEET = 5;
-const BANE_AURA_EFFECT_NAME_PREFIX = "pf2e x jb2a aura -";
-const BANE_AURA_NAME_HINTS = ["bane", "проклят"];
-const BANE_AURA_ORIGIN_HINTS = ["aura-bane"];
 
 let chatScrollElement = null;
 let chatAtBottom = false;
@@ -70,10 +68,20 @@ const RUSSIAN_NUMBER_MAP = {
   "десять": 10
 };
 
+const SPAN_GLYPH_CODE_MAP = {
+  a: { type: "action", actions: 1 },
+  1: { type: "action", actions: 1 },
+  d: { type: "action", actions: 2 },
+  2: { type: "action", actions: 2 },
+  t: { type: "action", actions: 3 },
+  3: { type: "action", actions: 3 },
+  r: { type: "reaction", actions: null },
+  f: { type: "free", actions: null }
+};
+
 function getHTMLElement(target) {
   if (!target) return null;
   if (target instanceof HTMLElement) return target;
-  if (Array.isArray(target) && target[0] instanceof HTMLElement) return target[0];
   if (target?.[0] instanceof HTMLElement) return target[0];
   if (typeof target?.get === "function") {
     const el = target.get(0);
@@ -175,13 +183,7 @@ function parseActionTypeFromDescription(description) {
 
   const spanGlyph = value.match(/<span class="action-glyph">\s*([123ARDF])\s*<\/span>/i);
   if (!spanGlyph) return null;
-  const code = spanGlyph[1].toLowerCase();
-  if (code === "a" || code === "1") return { type: "action", actions: 1 };
-  if (code === "d" || code === "2") return { type: "action", actions: 2 };
-  if (code === "t" || code === "3") return { type: "action", actions: 3 };
-  if (code === "r") return { type: "reaction", actions: null };
-  if (code === "f") return { type: "free", actions: null };
-  return null;
+  return SPAN_GLYPH_CODE_MAP[spanGlyph[1].toLowerCase()] ?? null;
 }
 
 function parseFrequencyMax(rawAmount) {
@@ -204,7 +206,6 @@ function parseFrequencyPer(rawUnit) {
   if (unit.includes("недел")) return "P1W";
   if (unit.includes("месяц")) return "P1M";
   if (unit.includes("год")) return "P1Y";
-  if (unit.includes("сут") || unit.includes("день") || unit.includes("дня") || unit.includes("дней")) return "day";
   return "day";
 }
 
@@ -257,13 +258,9 @@ function normalizeTraitKey(raw) {
 
 function extractTraitsFromDescription(description, validTraits) {
   const traits = [];
-  const value = String(description ?? "");
-  const regex = /@Trait\[([^\]|]+)(?:\|[^\]]+)?\]/gi;
-  let match = regex.exec(value);
-  while (match) {
+  for (const match of String(description ?? "").matchAll(/@Trait\[([^\]|]+)(?:\|[^\]]+)?\]/gi)) {
     const key = normalizeTraitKey(match[1]);
     if (key && validTraits.has(key)) traits.push(key);
-    match = regex.exec(value);
   }
   return traits;
 }
@@ -278,14 +275,12 @@ function sanitizeActionTraits(currentTraits, description) {
   if (Array.isArray(currentTraits)) candidates.push(...currentTraits);
   candidates.push(...extractTraitsFromDescription(description, validTraits));
 
-  const normalized = [];
+  const normalized = new Set();
   for (const trait of candidates) {
     const key = normalizeTraitKey(trait);
-    if (key && validTraits.has(key) && !normalized.includes(key)) {
-      normalized.push(key);
-    }
+    if (key && validTraits.has(key)) normalized.add(key);
   }
-  return normalized;
+  return [...normalized];
 }
 
 function getActionImage(actionType, actions) {
@@ -368,22 +363,21 @@ function isBaneAuraEffect(item) {
   return BANE_AURA_LABEL_PATTERNS.some((pattern) => pattern.test(name));
 }
 
+function _getBadgeDotValue(change) {
+  if (Object.prototype.hasOwnProperty.call(change, "system.badge.value")) {
+    return change["system.badge.value"];
+  }
+  return foundry.utils.getProperty(change, "system.badge.value");
+}
+
 function hasBaneBadgeValueUpdate(change) {
   if (!change || typeof change !== "object") return false;
-  if (Object.prototype.hasOwnProperty.call(change, "system.badge.value")) return true;
-  return foundry.utils.hasProperty(change, "system.badge.value");
+  return _getBadgeDotValue(change) !== undefined;
 }
 
 function getBaneBadgeValue(item, change) {
-  let value = null;
-  if (Object.prototype.hasOwnProperty.call(change, "system.badge.value")) {
-    value = change["system.badge.value"];
-  } else {
-    value = foundry.utils.getProperty(change, "system.badge.value");
-  }
-  if (value == null) {
-    value = item?.system?.badge?.value;
-  }
+  let value = _getBadgeDotValue(change);
+  if (value == null) value = item?.system?.badge?.value;
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : null;
 }
@@ -400,123 +394,67 @@ function getActorTokenForBaneAura(actor) {
   return canvas?.tokens?.placeables?.find((token) => token.actor?.id === actor.id) ?? null;
 }
 
-function getBaneAuraEffectCleanupIds(effectManager, token, effectItem, effectName) {
-  if (!effectManager || typeof effectManager.getEffects !== "function") return [];
+function getBaneAuraResizeDelta(sizeData) {
+  const sceneDistance = Number(canvas?.scene?.grid?.distance ?? 5);
+  if (!Number.isFinite(sceneDistance) || sceneDistance <= 0) return null;
+  const deltaGridUnits = BANE_AURA_EXPERIMENTAL_GROW_FEET / sceneDistance;
+  if (sizeData?.gridUnits) return { delta: deltaGridUnits, gridUnits: true };
+  const gridSize = Number(canvas?.grid?.size ?? 0);
+  if (!Number.isFinite(gridSize) || gridSize <= 0) return null;
+  return { delta: deltaGridUnits * gridSize, gridUnits: false };
+}
 
-  let activeEffects = [];
-  try {
-    activeEffects = effectManager.getEffects({ object: token }) ?? [];
-  } catch (_error) {
-    activeEffects = [];
-  }
-  if (!Array.isArray(activeEffects) || activeEffects.length === 0) return [];
+async function tryResizeExistingBaneAura(effectManager, effectItem, badgeValue) {
+  if (!shouldApplyBaneAuraVisualGrowBy5Experimental()) return false;
+  if (!effectManager || typeof effectManager.updateEffects !== "function") return false;
 
   const itemUuid = String(effectItem?.uuid ?? "").trim();
-  const normalizedEffectName = String(effectName ?? "").trim().toLowerCase();
-
-  const cleanupIds = new Set();
-  for (const activeEffect of activeEffects) {
-    const effectId = String(activeEffect?.id ?? "").trim();
-    if (!effectId) continue;
-
-    const effectNameValue = String(activeEffect?.data?.name ?? activeEffect?.name ?? "").trim();
-    const effectOriginValue = String(activeEffect?.data?.origin ?? activeEffect?.origin ?? "").trim();
-    const normalizedNameValue = effectNameValue.toLowerCase();
-    const normalizedOriginValue = effectOriginValue.toLowerCase();
-
-    const matchesItemOrigin = !!itemUuid && effectOriginValue === itemUuid;
-    const matchesDefaultName = !!normalizedEffectName && normalizedNameValue === normalizedEffectName;
-    const matchesBaneAuraName =
-      normalizedNameValue.startsWith(BANE_AURA_EFFECT_NAME_PREFIX) &&
-      BANE_AURA_NAME_HINTS.some((hint) => normalizedNameValue.includes(hint));
-    const matchesBaneAuraOrigin = BANE_AURA_ORIGIN_HINTS.some((hint) =>
-      normalizedOriginValue.includes(hint)
-    );
-
-    if (matchesItemOrigin || matchesDefaultName || matchesBaneAuraName || matchesBaneAuraOrigin) {
-      cleanupIds.add(effectId);
-    }
-  }
-
-  return Array.from(cleanupIds);
-}
-
-function getBaneAuraSceneId(token) {
-  const tokenSceneId = String(token?.scene?.id ?? token?.document?.parent?.id ?? "").trim();
-  if (tokenSceneId) return tokenSceneId;
-  return String(canvas?.scene?.id ?? game.user.viewedScene ?? "").trim();
-}
-
-function getBaneAuraResizeDeltaGridUnits() {
-  const sceneDistance = Number(canvas?.scene?.grid?.distance ?? 5);
-  if (!Number.isFinite(sceneDistance) || sceneDistance <= 0) return 1;
-  return BANE_AURA_EXPERIMENTAL_GROW_FEET / sceneDistance;
-}
-
-async function tryResizeExistingBaneAura(effectManager, token, effectItem, effectName, badgeValue) {
-  if (!shouldApplyBaneAuraVisualGrowBy5Experimental()) return false;
-  if (!effectManager || typeof effectManager.getEffects !== "function") return false;
-  if (typeof effectManager.updateEffects !== "function") return false;
-
-  const cleanupIds = getBaneAuraEffectCleanupIds(effectManager, token, effectItem, effectName);
-  if (cleanupIds.length === 0) return false;
+  if (!itemUuid) return false;
 
   let activeEffects = [];
   try {
-    activeEffects = effectManager.getEffects({ object: token }) ?? [];
+    activeEffects = effectManager.getEffects({ origin: itemUuid }) ?? [];
   } catch (_error) {
-    activeEffects = [];
+    return false;
   }
-  if (!Array.isArray(activeEffects) || activeEffects.length === 0) return false;
+  if (!activeEffects.length) return false;
 
-  const matchingEffects = activeEffects.filter((activeEffect) => {
-    const effectId = String(activeEffect?.id ?? "").trim();
-    return !!effectId && cleanupIds.includes(effectId);
-  });
-  if (matchingEffects.length === 0) return false;
+  const primary = activeEffects[activeEffects.length - 1];
+  const rawSize = primary?.data?.size;
+  if (!rawSize || typeof rawSize !== "object") return false;
+  if (rawSize.width === "auto" || rawSize.height === "auto") return false;
 
-  const primaryEffect = matchingEffects[matchingEffects.length - 1];
-  const primaryId = String(primaryEffect?.id ?? "").trim();
-  if (!primaryId) return false;
-
-  const width = Number(primaryEffect?.data?.size?.width);
-  const height = Number(primaryEffect?.data?.size?.height);
+  const width = Number(rawSize.width);
+  const height = Number(rawSize.height);
   if (!Number.isFinite(width) || width <= 0) return false;
   if (!Number.isFinite(height) || height <= 0) return false;
 
-  const deltaGridUnits = getBaneAuraResizeDeltaGridUnits();
-  if (!Number.isFinite(deltaGridUnits) || deltaGridUnits <= 0) return false;
+  const resizeDelta = getBaneAuraResizeDelta(rawSize);
+  if (!resizeDelta) return false;
 
-  const sceneId = getBaneAuraSceneId(token);
-  const staleIds = matchingEffects
-    .map((activeEffect) => String(activeEffect?.id ?? "").trim())
-    .filter((effectId) => !!effectId && effectId !== primaryId);
-
-  if (staleIds.length > 0 && effectManager.endEffects) {
-    await Promise.resolve(effectManager.endEffects({ effects: staleIds, sceneId }));
+  const stale = activeEffects.slice(0, -1);
+  if (stale.length) {
+    await effectManager.endEffects({ effects: stale });
   }
 
-  await Promise.resolve(
-    effectManager.updateEffects(
-      { effects: [primaryId], sceneId },
-      {
-        size: {
-          width: width + deltaGridUnits,
-          height: height + deltaGridUnits,
-          gridUnits: true
-        }
+  await effectManager.updateEffects(
+    { effects: [primary] },
+    {
+      size: {
+        width: width + resizeDelta.delta,
+        height: height + resizeDelta.delta,
+        ...(resizeDelta.gridUnits ? { gridUnits: true } : {})
       }
-    )
+    }
   );
 
   bridgeDebug("Bane aura visual resized in place (+5ft experimental)", {
     actor: String(effectItem?.actor?.name ?? effectItem?.actor?.id ?? ""),
-    token: String(token?.name ?? token?.id ?? ""),
     item: String(effectItem?.name ?? effectItem?.id ?? ""),
     badge: badgeValue,
-    staleCleared: staleIds.length,
-    resizedId: primaryId,
-    deltaFeet: BANE_AURA_EXPERIMENTAL_GROW_FEET
+    staleCleared: stale.length,
+    delta: resizeDelta.delta,
+    gridUnits: resizeDelta.gridUnits
   });
   return true;
 }
@@ -566,39 +504,13 @@ async function refreshBaneAuraVisual(itemUuid, badgeValue) {
   }
 
   const effectManager = globalThis.Sequencer?.EffectManager;
-  const itemName = String(effectItem.name ?? "").replace(/[^A-Za-z0-9 .*_-]/g, "");
-  const effectName = `${itemName}${token.id}`;
-  const sceneId = getBaneAuraSceneId(token);
 
   try {
-    const resizedInPlace = await tryResizeExistingBaneAura(
-      effectManager,
-      token,
-      effectItem,
-      effectName,
-      badgeValue
-    );
+    const resizedInPlace = await tryResizeExistingBaneAura(effectManager, effectItem, badgeValue);
     if (resizedInPlace) return;
 
     if (effectManager?.endEffects) {
-      await Promise.resolve(effectManager.endEffects({ object: token, name: effectName }));
-      await Promise.resolve(effectManager.endEffects({ object: token, origin: effectItem.uuid }));
-
-      const cleanupIds = getBaneAuraEffectCleanupIds(effectManager, token, effectItem, effectName);
-      if (cleanupIds.length > 0) {
-        bridgeDebug("clear stale Bane aura overlays", {
-          actor: String(actor?.name ?? actor?.id ?? ""),
-          token: String(token?.name ?? token?.id ?? ""),
-          count: cleanupIds.length
-        });
-
-        await Promise.resolve(
-          effectManager.endEffects({
-            effects: cleanupIds,
-            sceneId
-          })
-        );
-      }
+      await effectManager.endEffects({ origin: effectItem.uuid });
     }
 
     await aaApi.playAnimation(token, effectItem, {
@@ -704,18 +616,17 @@ function getTargetHelperActionRowsFixCss() {
   `;
 }
 
-function refreshTargetHelperActionRowsFixStyle() {
-  const currentStyle = document.getElementById(TOOLBELT_ACTION_ROWS_FIX_STYLE_ID);
-  if (currentStyle) {
-    currentStyle.remove();
-  }
-
-  if (!shouldApplyTargetHelperActionRowsFix()) return;
-
+function refreshStyleElement(id, shouldApply, getCss) {
+  document.getElementById(id)?.remove();
+  if (!shouldApply()) return;
   const style = document.createElement("style");
-  style.id = TOOLBELT_ACTION_ROWS_FIX_STYLE_ID;
-  style.textContent = getTargetHelperActionRowsFixCss();
+  style.id = id;
+  style.textContent = getCss();
   document.head.append(style);
+}
+
+function refreshTargetHelperActionRowsFixStyle() {
+  refreshStyleElement(TOOLBELT_ACTION_ROWS_FIX_STYLE_ID, shouldApplyTargetHelperActionRowsFix, getTargetHelperActionRowsFixCss);
 }
 
 function getForceBarrageTargetDialogBridgeCss() {
@@ -750,17 +661,7 @@ function getForceBarrageTargetDialogBridgeCss() {
 }
 
 function refreshForceBarrageTargetDialogBridgeStyle() {
-  const currentStyle = document.getElementById(FORCE_BARRAGE_TARGET_DIALOG_STYLE_ID);
-  if (currentStyle) {
-    currentStyle.remove();
-  }
-
-  if (!shouldApplyForceBarrageTargetDialogBridge()) return;
-
-  const style = document.createElement("style");
-  style.id = FORCE_BARRAGE_TARGET_DIALOG_STYLE_ID;
-  style.textContent = getForceBarrageTargetDialogBridgeCss();
-  document.head.append(style);
+  refreshStyleElement(FORCE_BARRAGE_TARGET_DIALOG_STYLE_ID, shouldApplyForceBarrageTargetDialogBridge, getForceBarrageTargetDialogBridgeCss);
 }
 
 function getCanvasTokenById(tokenId) {
@@ -945,6 +846,14 @@ function createTargetDialogLabelContent({ tokenId, tokenImage, displayName }) {
   return content;
 }
 
+function createTargetDialogLabelHtml({ tokenId, tokenImage, displayName }) {
+  const esc = (str) => String(str ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const iconHtml = tokenImage
+    ? `<img class="bridge-force-barrage-target-icon" src="${esc(tokenImage)}" alt="${esc(displayName)}">`
+    : "";
+  return `<span class="bridge-force-barrage-target-label" data-token-id="${esc(tokenId)}">${iconHtml}<span class="bridge-force-barrage-target-name">${esc(displayName)}</span></span>`;
+}
+
 function detectForceBarrageTargetDialog(root, userTargets, dialogTitle = "") {
   if (!(root instanceof HTMLElement)) return { matched: false, reason: "no-root" };
   const mode = getForceBarrageDialogMatchMode();
@@ -1055,19 +964,16 @@ function enhanceForceBarrageTargetDialog(app, html) {
     label.classList.add("bridge-force-barrage-target-label-host");
     label.title = targetData.displayName;
 
-    if (label.dataset.bridgeTokenHoverBound !== "true") {
-      label.dataset.bridgeTokenHoverBound = "true";
-      label.addEventListener("mouseenter", () => {
-        setDialogTokenHover(targetData.tokenId, true);
-      });
-      label.addEventListener("mouseleave", () => {
-        setDialogTokenHover(targetData.tokenId, false);
-      });
-      label.addEventListener("click", (event) => {
-        event.preventDefault();
-        focusDialogToken(targetData.tokenId);
-      });
-    }
+    label.addEventListener("mouseenter", () => {
+      setDialogTokenHover(targetData.tokenId, true);
+    });
+    label.addEventListener("mouseleave", () => {
+      setDialogTokenHover(targetData.tokenId, false);
+    });
+    label.addEventListener("click", (event) => {
+      event.preventDefault();
+      focusDialogToken(targetData.tokenId);
+    });
   }
 }
 
@@ -1089,8 +995,7 @@ function buildTargetDistributionQuickDialogRows(targets, options = {}) {
 
     let label = fallbackLabel || `Target ${rowIndex + 1}`;
     if (targetData) {
-      const content = createTargetDialogLabelContent(targetData);
-      label = content.outerHTML;
+      label = createTargetDialogLabelHtml(targetData);
     }
 
     return {
@@ -1116,9 +1021,7 @@ function installBridgeModuleApi() {
 }
 
 function sleep(ms) {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function getToolbeltMessageTargetUuids(message) {
@@ -1132,7 +1035,7 @@ function getToolbeltMessageTargetUuids(message) {
     }
   }
 
-  if (!Array.isArray(targetUuids) || targetUuids.length === 0) {
+  if (targetUuids.length === 0) {
     const fallbackValue = foundry.utils.getProperty(message, `flags.${TOOLBELT_ID}.targets`);
     if (Array.isArray(fallbackValue)) {
       targetUuids = fallbackValue;
@@ -1328,7 +1231,7 @@ async function runTargetHelperAttackBatchRoll(message, root, sourceEvent) {
       if (!targetId) continue;
 
       updateUserTargetIds([targetId]);
-      await sleep(25);
+      await sleep(TARGET_HELPER_TARGETING_SETTLE_MS);
       dispatchTargetHelperCheckRoll(checkLink, sourceEvent, forceFastMode);
       await sleep(TARGET_HELPER_ATTACK_BATCH_DELAY_MS);
     }
@@ -1397,15 +1300,11 @@ function formatEffectAppliedMessage(html) {
     const link = node.querySelector("a");
     if (!(link instanceof HTMLElement)) continue;
 
-    const existingBreaks = [];
     let cursor = link.previousSibling;
     while (cursor instanceof HTMLBRElement && cursor.dataset.bridgeEffectAppliedBreak === "true") {
-      existingBreaks.push(cursor);
-      cursor = cursor.previousSibling;
-    }
-
-    for (const br of existingBreaks) {
-      br.remove();
+      const prev = cursor.previousSibling;
+      cursor.remove();
+      cursor = prev;
     }
 
     const previousNode = link.previousSibling;
@@ -1424,23 +1323,14 @@ function isSafeSelfEffectUuid(uuid) {
 }
 
 function findSafeSelfEffectCandidate(description) {
-  const source = String(description ?? "");
-  const regex = /@\s*UUID\[(Compendium\.[^\]]+)\](?:\{([^}]*)\})?/gi;
   const uniqueCandidates = new Map();
-
-  let match = regex.exec(source);
-  while (match) {
+  for (const match of String(description ?? "").matchAll(/@\s*UUID\[(Compendium\.[^\]]+)\](?:\{([^}]*)\})?/gi)) {
     const uuid = String(match[1] ?? "").trim();
     const name = String(match[2] ?? "").trim();
     if (isSafeSelfEffectUuid(uuid) && !uniqueCandidates.has(uuid)) {
-      uniqueCandidates.set(uuid, {
-        uuid,
-        name: name || null
-      });
+      uniqueCandidates.set(uuid, { uuid, name: name || null });
     }
-    match = regex.exec(source);
   }
-
   if (uniqueCandidates.size !== 1) return null;
   return uniqueCandidates.values().next().value ?? null;
 }
@@ -1662,8 +1552,6 @@ Hooks.once("ready", () => {
       return;
     }
 
-    if (game.user.isActiveGM || !proxy || !activeGM) {
-      processAutomation(rollMessage);
-    }
+    processAutomation(rollMessage);
   });
 });

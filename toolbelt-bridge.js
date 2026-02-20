@@ -374,6 +374,22 @@ export function createToolbeltBridge({
     }
   }
 
+  function installBridgePatchWithFallback({
+    debugLabel,
+    target,
+    wrapper,
+    fallbackPatch
+  }) {
+    const libWrapperRegistered = registerBridgeLibWrapper(target, wrapper, "MIXED");
+    if (libWrapperRegistered) {
+      bridgeDebug(`${debugLabel} using libWrapper`);
+      return;
+    }
+
+    bridgeDebug(`${debugLabel} using fallback patch`);
+    fallbackPatch();
+  }
+
   function checkToolbeltCompatibility() {
     if (!game.modules.get(toolbeltId)?.active) return;
 
@@ -457,16 +473,8 @@ export function createToolbeltBridge({
 
     macroExecutionScopeStack.push(trackedScope);
     try {
-      if (!canBridgeFirstArg) {
-        return await wrapped(...args);
-      }
-
-      if (hasIncomingScopeArg) {
-        if (!trackedScope) return await wrapped(...args);
-        return await wrapped(trackedScope, ...args.slice(1));
-      }
-
-      if (!trackedScope) return await wrapped(...args);
+      if (!canBridgeFirstArg || !trackedScope) return await wrapped(...args);
+      if (hasIncomingScopeArg) return await wrapped(trackedScope, ...args.slice(1));
       return await wrapped(trackedScope);
     } finally {
       macroExecutionScopeStack.pop();
@@ -474,12 +482,12 @@ export function createToolbeltBridge({
   }
 
   async function runSpellCastLinkedBypass(entry, wrapped, spell, options = {}) {
+    if (!shouldApplyToolbeltSpellCastLinkedBypass()) {
+      return await wrapped(spell, options);
+    }
+
     const spellDoc = resolveSpellDocumentForCast(entry, spell);
     const castSpell = spellDoc ?? spell;
-
-    if (!shouldApplyToolbeltSpellCastLinkedBypass()) {
-      return await wrapped(castSpell, options);
-    }
 
     const activeScope = getLastScopeFromStack();
     const linkedFlagData =
@@ -540,23 +548,19 @@ export function createToolbeltBridge({
     const macroProto = CONFIG?.Macro?.documentClass?.prototype ?? Macro?.prototype;
     if (!macroProto || typeof macroProto.execute !== "function") return;
 
-    const libWrapperRegistered = registerBridgeLibWrapper(
-      "Macro.prototype.execute",
-      async function macroExecuteScopeBridgeWrapped(wrapped, ...args) {
+    installBridgePatchWithFallback({
+      debugLabel: "macro scope bridge",
+      target: "Macro.prototype.execute",
+      wrapper: async function macroExecuteScopeBridgeWrapped(wrapped, ...args) {
         return runMacroExecuteScopeBridge(this, (...wrappedArgs) => wrapped(...wrappedArgs), args);
       },
-      "MIXED"
-    );
-
-    if (!libWrapperRegistered) {
-      bridgeDebug("macro scope bridge using fallback patch");
-      const originalExecute = macroProto.execute;
-      macroProto.execute = async function macroExecuteScopeBridgeFallback(...args) {
-        return runMacroExecuteScopeBridge(this, (...wrappedArgs) => originalExecute.apply(this, wrappedArgs), args);
-      };
-    } else {
-      bridgeDebug("macro scope bridge using libWrapper");
-    }
+      fallbackPatch: () => {
+        const originalExecute = macroProto.execute;
+        macroProto.execute = async function macroExecuteScopeBridgeFallback(...args) {
+          return runMacroExecuteScopeBridge(this, (...wrappedArgs) => originalExecute.apply(this, wrappedArgs), args);
+        };
+      }
+    });
 
     macroExecuteScopeBridgePatched = true;
   }
@@ -567,23 +571,19 @@ export function createToolbeltBridge({
     const spellcastingProto = CONFIG?.PF2E?.Item?.documentClasses?.spellcastingEntry?.prototype;
     if (!spellcastingProto || typeof spellcastingProto.cast !== "function") return;
 
-    const libWrapperRegistered = registerBridgeLibWrapper(
-      "CONFIG.PF2E.Item.documentClasses.spellcastingEntry.prototype.cast",
-      async function spellCastLinkedBypassWrapped(wrapped, spell, options = {}) {
+    installBridgePatchWithFallback({
+      debugLabel: "spell cast bypass",
+      target: "CONFIG.PF2E.Item.documentClasses.spellcastingEntry.prototype.cast",
+      wrapper: async function spellCastLinkedBypassWrapped(wrapped, spell, options = {}) {
         return runSpellCastLinkedBypass(this, (wrappedSpell, wrappedOptions) => wrapped(wrappedSpell, wrappedOptions), spell, options);
       },
-      "MIXED"
-    );
-
-    if (!libWrapperRegistered) {
-      bridgeDebug("spell cast bypass using fallback patch");
-      const originalCast = spellcastingProto.cast;
-      spellcastingProto.cast = async function spellCastLinkedBypassFallback(spell, options = {}) {
-        return runSpellCastLinkedBypass(this, (wrappedSpell, wrappedOptions) => originalCast.call(this, wrappedSpell, wrappedOptions), spell, options);
-      };
-    } else {
-      bridgeDebug("spell cast bypass using libWrapper");
-    }
+      fallbackPatch: () => {
+        const originalCast = spellcastingProto.cast;
+        spellcastingProto.cast = async function spellCastLinkedBypassFallback(spell, options = {}) {
+          return runSpellCastLinkedBypass(this, (wrappedSpell, wrappedOptions) => originalCast.call(this, wrappedSpell, wrappedOptions), spell, options);
+        };
+      }
+    });
 
     spellCastLinkedMacroBypassPatched = true;
   }

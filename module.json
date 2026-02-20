@@ -26,7 +26,9 @@
       {
         "id": "pf2e-toolbelt",
         "type": "module"
-      },
+      }
+    ],
+    "recommends": [
       {
         "id": "patreon-v3",
         "type": "module"

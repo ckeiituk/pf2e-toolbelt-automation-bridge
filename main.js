@@ -581,7 +581,6 @@ function getToolbeltBridge() {
     linkedSuppressionUses: 1,
     actionablePatchRetryMs: 250,
     actionablePatchMaxRetries: 40,
-    actionableGetItemMacroPath: "game.toolbelt.dev.tools.actionable.getItemMacro",
     bridgeDebug,
     warnCompatibility: warnBridgeCompatibility
   });
@@ -1392,8 +1391,28 @@ function installItemActivationsCreatePatch() {
   const actorProto = CONFIG?.Actor?.documentClass?.prototype ?? Actor?.prototype;
   if (!actorProto || typeof actorProto.createEmbeddedDocuments !== "function") return;
 
+  const target = "CONFIG.Actor.documentClass.prototype.createEmbeddedDocuments";
+
+  if (typeof globalThis?.libWrapper?.register === "function") {
+    try {
+      globalThis.libWrapper.register(MODULE_ID, target, async function createEmbeddedDocumentsWrapped(wrapped, embeddedName, data, operation) {
+        let payload = data;
+        if (embeddedName === "Item" && shouldApplyItemActivationsCreateSanitizer()) {
+          payload = sanitizeItemActivationCreateData(data);
+        }
+        return wrapped(embeddedName, payload, operation);
+      }, "WRAPPER");
+      actorCreateEmbeddedDocumentsPatched = true;
+      bridgeDebug("item activations create patch using libWrapper");
+      return;
+    } catch (error) {
+      console.warn(`[${MODULE_ID}] Failed to register libWrapper for ${target}`, error);
+    }
+  }
+
+  bridgeDebug("item activations create patch using fallback");
   const originalCreateEmbeddedDocuments = actorProto.createEmbeddedDocuments;
-  actorProto.createEmbeddedDocuments = async function createEmbeddedDocumentsPatched(embeddedName, data, operation) {
+  actorProto.createEmbeddedDocuments = async function createEmbeddedDocumentsFallback(embeddedName, data, operation) {
     let payload = data;
     if (embeddedName === "Item" && shouldApplyItemActivationsCreateSanitizer()) {
       payload = sanitizeItemActivationCreateData(data);
@@ -1537,7 +1556,8 @@ Hooks.once("ready", () => {
 
   game.socket.on(SOCKET, (payload) => {
     if (!game.user.isActiveGM) return;
-    processAutomation(payload?.rollMessage);
+    if (!payload?.rollMessage || typeof payload.rollMessage !== "object") return;
+    processAutomation(payload.rollMessage);
   });
 
   Hooks.on("pf2e-toolbelt.rollSave", ({ rollMessage }) => {

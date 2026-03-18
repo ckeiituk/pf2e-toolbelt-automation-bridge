@@ -9,7 +9,7 @@ export function createToolbeltBridge({
   linkedSuppressionUses = 1,
   actionablePatchRetryMs = 250,
   actionablePatchMaxRetries = 40,
-  actionableGetItemMacroPath = "game.toolbelt.dev.tools.actionable.getItemMacro",
+  actionableGetItemMacroPath = "game.toolbelt.api.actionable.getItemMacro",
   bridgeDebug = () => {},
   warnCompatibility = () => {}
 }) {
@@ -261,7 +261,7 @@ export function createToolbeltBridge({
   function installToolbeltActionableGetItemMacroSuppressionPatch() {
     if (toolbeltGetItemMacroSuppressionPatched) return true;
 
-    const actionableGetItemMacro = game?.toolbelt?.dev?.tools?.actionable?.getItemMacro;
+    const actionableGetItemMacro = game?.toolbelt?.api?.actionable?.getItemMacro;
     if (typeof actionableGetItemMacro !== "function") {
       warnCompatibility(
         "toolbelt-actionable-missing",
@@ -400,7 +400,7 @@ export function createToolbeltBridge({
       );
     }
 
-    const actionableGetItemMacro = game?.toolbelt?.dev?.tools?.actionable?.getItemMacro;
+    const actionableGetItemMacro = game?.toolbelt?.api?.actionable?.getItemMacro;
     if (typeof actionableGetItemMacro !== "function") {
       warnCompatibility(
         "toolbelt-actionable-shape",

@@ -5,18 +5,13 @@ export function createToolbeltBridge({
   settingsKeyMacroScopeBridge = "toolbeltMacroScopeBridge",
   settingsKeySpellCastBypass = "toolbeltSpellCastLinkedBypass",
   asyncScopeFallbackTtlMs = 12000,
-  linkedSuppressionTtlMs = 86400000,
-  linkedSuppressionUses = 1,
-  actionableGetItemMacroPath = "game.toolbelt.api.actionable.getItemMacro",
   bridgeDebug = () => {},
   warnCompatibility = () => {}
 }) {
   let macroExecuteScopeBridgePatched = false;
   let spellCastLinkedMacroBypassPatched = false;
-  let toolbeltGetItemMacroSuppressionPatched = false;
   const macroExecutionScopeStack = [];
   const macroExecutionFallbackScopes = [];
-  const toolbeltLinkedMacroSuppressions = new Map();
 
   function shouldApplyToolbeltMacroScopeBridge() {
     return (
@@ -164,200 +159,6 @@ export function createToolbeltBridge({
     }
   }
 
-  function getSpellSuppressionKeys(spell) {
-    if (!spell) return [];
-    const keys = [];
-    const id = String(spell?.id ?? spell?._id ?? "").trim();
-    const uuid = String(spell?.uuid ?? "").trim();
-    const actorId = String(spell?.actor?.id ?? spell?.parent?.id ?? "").trim();
-    if (uuid) keys.push(`uuid:${uuid}`);
-    if (id) {
-      keys.push(`id:${id}`);
-      if (actorId) keys.push(`actor:${actorId}:id:${id}`);
-    }
-    return [...new Set(keys)];
-  }
-
-  function cleanupLinkedMacroSuppressions() {
-    const now = Date.now();
-    for (const [key, data] of toolbeltLinkedMacroSuppressions.entries()) {
-      if (!data || data.expiresAt <= now || data.uses <= 0) {
-        toolbeltLinkedMacroSuppressions.delete(key);
-      }
-    }
-  }
-
-  function registerLinkedMacroSuppressionForSpell(spell, uses = linkedSuppressionUses, scopeRef = null) {
-    if (!spell || uses <= 0) return;
-    cleanupLinkedMacroSuppressions();
-    const expiresAt = Date.now() + linkedSuppressionTtlMs;
-    const keys = getSpellSuppressionKeys(spell);
-    bridgeDebug("register suppression", {
-      spell: String(spell?.name ?? spell?.id ?? ""),
-      keys,
-      uses,
-      scopeBound: !!scopeRef
-    });
-    for (const key of keys) {
-      const existing = toolbeltLinkedMacroSuppressions.get(key);
-      const mergedUses = Math.max(existing?.uses ?? 0, uses);
-      const mergedExpiry = Math.max(existing?.expiresAt ?? 0, expiresAt);
-      toolbeltLinkedMacroSuppressions.set(key, {
-        uses: mergedUses,
-        expiresAt: mergedExpiry,
-        scopeRef: scopeRef ?? existing?.scopeRef ?? null
-      });
-    }
-  }
-
-  function consumeLinkedMacroSuppressionForSpell(spell, scopeRef = null) {
-    cleanupLinkedMacroSuppressions();
-    const keys = getSpellSuppressionKeys(spell);
-    for (const key of keys) {
-      const existing = toolbeltLinkedMacroSuppressions.get(key);
-      if (!existing) continue;
-      if (existing.scopeRef && scopeRef && existing.scopeRef !== scopeRef) continue;
-      if (existing.scopeRef && !scopeRef) continue;
-
-      const remaining = existing.uses - 1;
-      if (remaining <= 0) {
-        toolbeltLinkedMacroSuppressions.delete(key);
-      } else {
-        toolbeltLinkedMacroSuppressions.set(key, {
-          uses: remaining,
-          expiresAt: existing.expiresAt,
-          scopeRef: existing.scopeRef ?? null
-        });
-      }
-      bridgeDebug("consume suppression", {
-        spell: String(spell?.name ?? spell?.id ?? ""),
-        key,
-        remaining,
-        scopeBound: !!existing.scopeRef
-      });
-      return true;
-    }
-    bridgeDebug("consume suppression miss", {
-      spell: String(spell?.name ?? spell?.id ?? ""),
-      keys,
-      scopeBound: !!scopeRef
-    });
-    return false;
-  }
-
-  function getToolbeltScopeForSuppression(spell) {
-    const activeScope = getLastScopeFromStack();
-    if (isToolbeltCastScope(activeScope) && isSameSpellReference(spell, activeScope.spell)) {
-      return activeScope;
-    }
-
-    return findMacroExecutionFallbackScope(spell);
-  }
-
-  function installToolbeltActionableGetItemMacroSuppressionPatch() {
-    if (toolbeltGetItemMacroSuppressionPatched) return true;
-
-    const actionableGetItemMacro = game?.toolbelt?.api?.actionable?.getItemMacro;
-    if (typeof actionableGetItemMacro !== "function") return false;
-
-    const libWrapperRegistered = registerBridgeLibWrapper(
-      actionableGetItemMacroPath,
-      async function toolbeltGetItemMacroSuppressed(wrapped, action) {
-        const suppressionScope = getToolbeltScopeForSuppression(action);
-        if (
-          shouldApplyToolbeltSpellCastLinkedBypass() &&
-          suppressionScope &&
-          consumeLinkedMacroSuppressionForSpell(action, suppressionScope)
-        ) {
-          bridgeDebug("suppress actionable linked macro lookup", {
-            spell: String(action?.name ?? action?.id ?? ""),
-            scopeSpell: String(suppressionScope?.spell?.name ?? suppressionScope?.spell?.id ?? "")
-          });
-          return null;
-        }
-        return await wrapped(action);
-      },
-      "MIXED"
-    );
-
-    if (libWrapperRegistered) {
-      bridgeDebug("installed getItemMacro suppression wrapper via libWrapper", { target: actionableGetItemMacroPath });
-      toolbeltGetItemMacroSuppressionPatched = true;
-      return true;
-    }
-
-    const toolbelt = game?.toolbelt;
-    const api = toolbelt?.api;
-    const actionable = api?.actionable;
-    if (!toolbelt || !api || !actionable) return false;
-
-    const originalGetItemMacro = actionable.getItemMacro;
-
-    function suppressedGetItemMacro(action) {
-      const suppressionScope = getToolbeltScopeForSuppression(action);
-      if (
-        shouldApplyToolbeltSpellCastLinkedBypass() &&
-        suppressionScope &&
-        consumeLinkedMacroSuppressionForSpell(action, suppressionScope)
-      ) {
-        bridgeDebug("suppress actionable linked macro lookup", {
-          spell: String(action?.name ?? action?.id ?? ""),
-          scopeSpell: String(suppressionScope?.spell?.name ?? suppressionScope?.spell?.id ?? "")
-        });
-        return Promise.resolve(null);
-      }
-      return originalGetItemMacro.call(actionable, action);
-    }
-
-    const actionableProxy = new Proxy(actionable, {
-      get(target, prop, receiver) {
-        if (prop === "getItemMacro") return suppressedGetItemMacro;
-        return Reflect.get(target, prop, receiver);
-      }
-    });
-
-    const apiProxy = new Proxy(api, {
-      get(target, prop, receiver) {
-        if (prop === "actionable") return actionableProxy;
-        return Reflect.get(target, prop, receiver);
-      }
-    });
-
-    const candidates = [
-      { label: "api.actionable", apply: () => { api.actionable = actionableProxy; }, check: () => api.actionable === actionableProxy },
-      { label: "toolbelt.api", apply: () => { toolbelt.api = apiProxy; }, check: () => toolbelt.api === apiProxy },
-      { label: "game.toolbelt", apply: () => { game.toolbelt = new Proxy(toolbelt, {
-        get(target, prop, receiver) {
-          if (prop === "api") return apiProxy;
-          return Reflect.get(target, prop, receiver);
-        }
-      }); }, check: () => game.toolbelt !== toolbelt }
-    ];
-
-    for (const candidate of candidates) {
-      try {
-        candidate.apply();
-        if (candidate.check()) {
-          bridgeDebug(`installed getItemMacro suppression via Proxy (${candidate.label})`, { target: actionableGetItemMacroPath });
-          toolbeltGetItemMacroSuppressionPatched = true;
-          return true;
-        }
-      } catch (_error) {
-        // try next level
-      }
-    }
-
-    bridgeDebug("getItemMacro suppression unavailable: all Proxy levels failed (Toolbelt API is frozen)", { target: actionableGetItemMacroPath });
-    return false;
-  }
-
-  function scheduleToolbeltActionableGetItemMacroSuppressionPatch() {
-    if (toolbeltGetItemMacroSuppressionPatched) return;
-    if (!installToolbeltActionableGetItemMacroSuppressionPatch()) {
-      bridgeDebug("getItemMacro suppression unavailable (Toolbelt API is frozen, non-critical)");
-    }
-  }
-
   function resolveSpellDocumentForCast(entry, spell) {
     if (!spell) return null;
     if (spell?.documentName === "Item" && spell?.type === "spell") {
@@ -484,9 +285,6 @@ export function createToolbeltBridge({
 
     if (bridgeEnabled && trackedScope) {
       rememberMacroExecutionFallbackScope(trackedScope);
-      if (shouldApplyToolbeltSpellCastLinkedBypass()) {
-        registerLinkedMacroSuppressionForSpell(trackedScope.spell, linkedSuppressionUses, trackedScope);
-      }
     }
 
     macroExecutionScopeStack.push(trackedScope);
@@ -609,7 +407,6 @@ export function createToolbeltBridge({
   return {
     checkToolbeltCompatibility,
     installMacroExecuteScopeBridge,
-    installToolbeltSpellCastLinkedBypass,
-    scheduleToolbeltActionableGetItemMacroSuppressionPatch
+    installToolbeltSpellCastLinkedBypass
   };
 }

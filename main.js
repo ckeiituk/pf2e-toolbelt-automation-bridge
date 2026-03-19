@@ -577,8 +577,6 @@ function getToolbeltBridge() {
     settingsKeyMacroScopeBridge: "toolbeltMacroScopeBridge",
     settingsKeySpellCastBypass: "toolbeltSpellCastLinkedBypass",
     asyncScopeFallbackTtlMs: 12000,
-    linkedSuppressionTtlMs: 86400000,
-    linkedSuppressionUses: 1,
     bridgeDebug,
     warnCompatibility: warnBridgeCompatibility
   });
@@ -1492,8 +1490,6 @@ Hooks.once("ready", () => {
   refreshForceBarrageTargetDialogBridgeStyle();
   toolbeltBridgeInstance.installMacroExecuteScopeBridge();
   toolbeltBridgeInstance.installToolbeltSpellCastLinkedBypass();
-  toolbeltBridgeInstance.scheduleToolbeltActionableGetItemMacroSuppressionPatch();
-
   Hooks.on("renderDialog", (app, html) => {
     try {
       enhanceForceBarrageTargetDialog(app, html);

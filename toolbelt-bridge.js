@@ -293,10 +293,52 @@ export function createToolbeltBridge({
       "MIXED"
     );
 
-    if (!libWrapperRegistered) return false;
-    bridgeDebug("installed getItemMacro suppression wrapper", { target: actionableGetItemMacroPath });
-    toolbeltGetItemMacroSuppressionPatched = true;
-    return true;
+    if (libWrapperRegistered) {
+      bridgeDebug("installed getItemMacro suppression wrapper via libWrapper", { target: actionableGetItemMacroPath });
+      toolbeltGetItemMacroSuppressionPatched = true;
+      return true;
+    }
+
+    const api = game?.toolbelt?.api;
+    const actionable = api?.actionable;
+    if (!api || !actionable) return false;
+
+    const originalGetItemMacro = actionable.getItemMacro;
+    try {
+      api.actionable = new Proxy(actionable, {
+        get(target, prop, receiver) {
+          if (prop === "getItemMacro") {
+            return async function toolbeltGetItemMacroSuppressed(action) {
+              const suppressionScope = getToolbeltScopeForSuppression(action);
+              if (
+                shouldApplyToolbeltSpellCastLinkedBypass() &&
+                suppressionScope &&
+                consumeLinkedMacroSuppressionForSpell(action, suppressionScope)
+              ) {
+                bridgeDebug("suppress actionable linked macro lookup", {
+                  spell: String(action?.name ?? action?.id ?? ""),
+                  scopeSpell: String(suppressionScope?.spell?.name ?? suppressionScope?.spell?.id ?? "")
+                });
+                return null;
+              }
+              return await originalGetItemMacro.call(target, action);
+            };
+          }
+          return Reflect.get(target, prop, receiver);
+        }
+      });
+    } catch (error) {
+      console.warn(`[${moduleId}] Failed to install Proxy fallback for ${actionableGetItemMacroPath}`, error);
+      return false;
+    }
+
+    if (api.actionable !== actionable) {
+      bridgeDebug("installed getItemMacro suppression wrapper via Proxy fallback", { target: actionableGetItemMacroPath });
+      toolbeltGetItemMacroSuppressionPatched = true;
+      return true;
+    }
+
+    return false;
   }
 
   function scheduleToolbeltActionableGetItemMacroSuppressionPatch() {

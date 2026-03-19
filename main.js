@@ -579,8 +579,6 @@ function getToolbeltBridge() {
     asyncScopeFallbackTtlMs: 12000,
     linkedSuppressionTtlMs: 86400000,
     linkedSuppressionUses: 1,
-    actionablePatchRetryMs: 250,
-    actionablePatchMaxRetries: 40,
     bridgeDebug,
     warnCompatibility: warnBridgeCompatibility
   });

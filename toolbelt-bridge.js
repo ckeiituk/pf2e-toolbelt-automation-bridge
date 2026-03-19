@@ -7,8 +7,6 @@ export function createToolbeltBridge({
   asyncScopeFallbackTtlMs = 12000,
   linkedSuppressionTtlMs = 86400000,
   linkedSuppressionUses = 1,
-  actionablePatchRetryMs = 250,
-  actionablePatchMaxRetries = 40,
   actionableGetItemMacroPath = "game.toolbelt.api.actionable.getItemMacro",
   bridgeDebug = () => {},
   warnCompatibility = () => {}
@@ -16,8 +14,6 @@ export function createToolbeltBridge({
   let macroExecuteScopeBridgePatched = false;
   let spellCastLinkedMacroBypassPatched = false;
   let toolbeltGetItemMacroSuppressionPatched = false;
-  let toolbeltGetItemMacroSuppressionPatchIntervalId = null;
-  let toolbeltGetItemMacroSuppressionPatchRetries = 0;
   const macroExecutionScopeStack = [];
   const macroExecutionFallbackScopes = [];
   const toolbeltLinkedMacroSuppressions = new Map();
@@ -262,16 +258,7 @@ export function createToolbeltBridge({
     if (toolbeltGetItemMacroSuppressionPatched) return true;
 
     const actionableGetItemMacro = game?.toolbelt?.api?.actionable?.getItemMacro;
-    if (typeof actionableGetItemMacro !== "function") {
-      warnCompatibility(
-        "toolbelt-actionable-missing",
-        `Expected Toolbelt API path missing: ${actionableGetItemMacroPath}`,
-        {
-          toolbeltVersion: String(game.modules.get(toolbeltId)?.version ?? "unknown")
-        }
-      );
-      return false;
-    }
+    if (typeof actionableGetItemMacro !== "function") return false;
 
     const libWrapperRegistered = registerBridgeLibWrapper(
       actionableGetItemMacroPath,
@@ -366,28 +353,9 @@ export function createToolbeltBridge({
 
   function scheduleToolbeltActionableGetItemMacroSuppressionPatch() {
     if (toolbeltGetItemMacroSuppressionPatched) return;
-
-    if (installToolbeltActionableGetItemMacroSuppressionPatch()) {
-      return;
+    if (!installToolbeltActionableGetItemMacroSuppressionPatch()) {
+      bridgeDebug("getItemMacro suppression unavailable (Toolbelt API is frozen, non-critical)");
     }
-
-    if (toolbeltGetItemMacroSuppressionPatchIntervalId !== null) return;
-
-    toolbeltGetItemMacroSuppressionPatchRetries = 0;
-    toolbeltGetItemMacroSuppressionPatchIntervalId = window.setInterval(() => {
-      if (toolbeltGetItemMacroSuppressionPatched || installToolbeltActionableGetItemMacroSuppressionPatch()) {
-        window.clearInterval(toolbeltGetItemMacroSuppressionPatchIntervalId);
-        toolbeltGetItemMacroSuppressionPatchIntervalId = null;
-        return;
-      }
-
-      toolbeltGetItemMacroSuppressionPatchRetries += 1;
-      if (toolbeltGetItemMacroSuppressionPatchRetries >= actionablePatchMaxRetries) {
-        window.clearInterval(toolbeltGetItemMacroSuppressionPatchIntervalId);
-        toolbeltGetItemMacroSuppressionPatchIntervalId = null;
-        bridgeDebug("getItemMacro suppression patch unavailable after retries (non-critical)");
-      }
-    }, actionablePatchRetryMs);
   }
 
   function resolveSpellDocumentForCast(entry, spell) {
@@ -458,17 +426,6 @@ export function createToolbeltBridge({
       warnCompatibility(
         "libwrapper-missing",
         "libWrapper is not available; bridge will use fallback prototype patches with higher conflict risk."
-      );
-    }
-
-    const actionableGetItemMacro = game?.toolbelt?.api?.actionable?.getItemMacro;
-    if (typeof actionableGetItemMacro !== "function") {
-      warnCompatibility(
-        "toolbelt-actionable-shape",
-        `Toolbelt API not in expected shape: ${actionableGetItemMacroPath}`,
-        {
-          toolbeltVersion: String(game.modules.get(toolbeltId)?.version ?? "unknown")
-        }
       );
     }
 

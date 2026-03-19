@@ -299,45 +299,68 @@ export function createToolbeltBridge({
       return true;
     }
 
-    const api = game?.toolbelt?.api;
+    const toolbelt = game?.toolbelt;
+    const api = toolbelt?.api;
     const actionable = api?.actionable;
-    if (!api || !actionable) return false;
+    if (!toolbelt || !api || !actionable) return false;
 
     const originalGetItemMacro = actionable.getItemMacro;
-    try {
-      api.actionable = new Proxy(actionable, {
+
+    function suppressedGetItemMacro(action) {
+      const suppressionScope = getToolbeltScopeForSuppression(action);
+      if (
+        shouldApplyToolbeltSpellCastLinkedBypass() &&
+        suppressionScope &&
+        consumeLinkedMacroSuppressionForSpell(action, suppressionScope)
+      ) {
+        bridgeDebug("suppress actionable linked macro lookup", {
+          spell: String(action?.name ?? action?.id ?? ""),
+          scopeSpell: String(suppressionScope?.spell?.name ?? suppressionScope?.spell?.id ?? "")
+        });
+        return Promise.resolve(null);
+      }
+      return originalGetItemMacro.call(actionable, action);
+    }
+
+    const actionableProxy = new Proxy(actionable, {
+      get(target, prop, receiver) {
+        if (prop === "getItemMacro") return suppressedGetItemMacro;
+        return Reflect.get(target, prop, receiver);
+      }
+    });
+
+    const apiProxy = new Proxy(api, {
+      get(target, prop, receiver) {
+        if (prop === "actionable") return actionableProxy;
+        return Reflect.get(target, prop, receiver);
+      }
+    });
+
+    const candidates = [
+      { label: "api.actionable", apply: () => { api.actionable = actionableProxy; }, check: () => api.actionable === actionableProxy },
+      { label: "toolbelt.api", apply: () => { toolbelt.api = apiProxy; }, check: () => toolbelt.api === apiProxy },
+      { label: "game.toolbelt", apply: () => { game.toolbelt = new Proxy(toolbelt, {
         get(target, prop, receiver) {
-          if (prop === "getItemMacro") {
-            return async function toolbeltGetItemMacroSuppressed(action) {
-              const suppressionScope = getToolbeltScopeForSuppression(action);
-              if (
-                shouldApplyToolbeltSpellCastLinkedBypass() &&
-                suppressionScope &&
-                consumeLinkedMacroSuppressionForSpell(action, suppressionScope)
-              ) {
-                bridgeDebug("suppress actionable linked macro lookup", {
-                  spell: String(action?.name ?? action?.id ?? ""),
-                  scopeSpell: String(suppressionScope?.spell?.name ?? suppressionScope?.spell?.id ?? "")
-                });
-                return null;
-              }
-              return await originalGetItemMacro.call(target, action);
-            };
-          }
+          if (prop === "api") return apiProxy;
           return Reflect.get(target, prop, receiver);
         }
-      });
-    } catch (error) {
-      console.warn(`[${moduleId}] Failed to install Proxy fallback for ${actionableGetItemMacroPath}`, error);
-      return false;
+      }); }, check: () => game.toolbelt !== toolbelt }
+    ];
+
+    for (const candidate of candidates) {
+      try {
+        candidate.apply();
+        if (candidate.check()) {
+          bridgeDebug(`installed getItemMacro suppression via Proxy (${candidate.label})`, { target: actionableGetItemMacroPath });
+          toolbeltGetItemMacroSuppressionPatched = true;
+          return true;
+        }
+      } catch (_error) {
+        // try next level
+      }
     }
 
-    if (api.actionable !== actionable) {
-      bridgeDebug("installed getItemMacro suppression wrapper via Proxy fallback", { target: actionableGetItemMacroPath });
-      toolbeltGetItemMacroSuppressionPatched = true;
-      return true;
-    }
-
+    bridgeDebug("getItemMacro suppression unavailable: all Proxy levels failed (Toolbelt API is frozen)", { target: actionableGetItemMacroPath });
     return false;
   }
 
@@ -362,11 +385,7 @@ export function createToolbeltBridge({
       if (toolbeltGetItemMacroSuppressionPatchRetries >= actionablePatchMaxRetries) {
         window.clearInterval(toolbeltGetItemMacroSuppressionPatchIntervalId);
         toolbeltGetItemMacroSuppressionPatchIntervalId = null;
-        console.warn(`[${moduleId}] Failed to patch Toolbelt actionable.getItemMacro after retries`);
-        warnCompatibility(
-          "toolbelt-actionable-patch-retries",
-          "Unable to install Toolbelt actionable.getItemMacro suppression patch after retries."
-        );
+        bridgeDebug("getItemMacro suppression patch unavailable after retries (non-critical)");
       }
     }, actionablePatchRetryMs);
   }
